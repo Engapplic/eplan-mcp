@@ -220,6 +220,7 @@ from .ops import (
     live_insert_macro,
     live_place_structure_box,
     live_place_image,
+    live_resize_box,
     live_place_panel_item,
     live_place_plc_point,
     live_place_terminal,
@@ -382,6 +383,7 @@ from .cables_live import (
     live_place_cable_definition,
     live_assign_cable_connections,
     live_decorate_cable_crossings,
+    live_set_conductor_colours,
 )
 
 from .project_live import (
@@ -514,7 +516,7 @@ __all__ = [
     # Target project + batched page operations
     'live_set_target_project',
     'live_batch', 'live_find_placements', 'live_place_device', 'live_insert_macro',
-    'live_place_structure_box', 'live_place_image',
+    'live_place_structure_box', 'live_place_image', 'live_resize_box',
     'live_place_panel_item', 'live_place_plc_point', 'live_place_terminal',
     'live_update_placement', 'live_render_page', 'live_check_page',
     # PLC
@@ -564,7 +566,7 @@ __all__ = [
     'live_panel_captions', 'live_set_panel_captions',
     'live_property_texts', 'live_set_property_texts',
     'live_terminal_strips', 'live_set_terminal_strip_definition',
-    'live_cables', 'live_place_cable_definition', 'live_assign_cable_connections', 'live_decorate_cable_crossings',
+    'live_cables', 'live_place_cable_definition', 'live_assign_cable_connections', 'live_decorate_cable_crossings', 'live_set_conductor_colours',
     'live_project_templates', 'live_create_project',
     'live_query_functions', 'live_query_pages', 'live_plc_io_list', 'live_set_function_text',
     'live_set_connection_designations', 'live_read_check_messages',

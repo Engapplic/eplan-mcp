@@ -630,6 +630,25 @@ _OPS_HELPERS = r'''
         MethodInfo sla = RequireMethod(lbT, "SetLogicalArea", new string[] { "PointD", "PointD" }, false);
         Call(sla, lb, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });
         GetWritable(lbT, "Name").SetValue(lb, name, null);
+        // The label: like any function, the box shows its tag only once
+        // VisibleName is set (a box from the API came out with an empty
+        // "=ST1+CAMPO" label on P26009, 2026-11-06). VisibleName first;
+        // VisibleNameParts = NameParts as the fallback.
+        string labelRoute = null;
+        try { GetWritable(lbT, "VisibleName").SetValue(lb, name, null); labelRoute = "VisibleName"; }
+        catch (Exception e1) { r["visibleNameError"] = Flatten(e1); }
+        string vis = VisibleNameOf(lb);
+        if (string.IsNullOrEmpty(vis))
+        {
+            try
+            {
+                PropertyInfo vnp = GetWritable(lbT, "VisibleNameParts");
+                object np = TryRead(lb, "NameParts", null);
+                if (vnp != null && np != null) { vnp.SetValue(lb, np, null); labelRoute = "VisibleNameParts"; vis = VisibleNameOf(lb); }
+            }
+            catch (Exception e2) { r["visibleNamePartsError"] = Flatten(e2); }
+        }
+        r["visibleName"] = vis ?? ""; r["labelRoute"] = labelRoute;
         if (Has(a, "properties")) SetProps(lb, (JObject)a["properties"], r);
         r["handle"] = Handle(lb);
         r["name"] = PropText(lb, "Name");
@@ -772,6 +791,33 @@ _OPS_HELPERS = r'''
         r["placed"] = DumpPlacement(o, false);
     }
 
+    static void OpResize(object page, JObject a, Dictionary<string, string> labels, Dictionary<string, object> r)
+    {
+        // Resize a box that already exists (BoxedDevice, LocationBox, PLC
+        // box: any SymbolReference with SetLogicalArea). Like the GUI, the
+        // Location becomes the new top-left corner, so the texts that hang
+        // off it move with the box; pins placed apart (DCP) stay where
+        // they are, as the GUI leaves them (P26009, 2026-11-06).
+        object o = Resolve(page, Req(a, "ref"), labels);
+        double x1 = D(a, "x1", 0), y1 = D(a, "y1", 0), x2 = D(a, "x2", 0), y2 = D(a, "y2", 0);
+        if (Math.Abs(x2 - x1) < 1 || Math.Abs(y2 - y1) < 1) throw new Exception("The box needs two distinct corners (x1,y1)-(x2,y2) at least 1 mm apart.");
+        double bx0 = Math.Min(x1, x2), bx1 = Math.Max(x1, x2), by0 = Math.Min(y1, y2), by1 = Math.Max(y1, y2);
+        Type t = o.GetType();
+        MethodInfo sla = MethodByShape(t, "SetLogicalArea", new string[] { "PointD", "PointD" }, false);
+        if (sla == null) throw new Exception("A " + t.Name + " has no SetLogicalArea(PointD, PointD): only boxes (BoxedDevice, LocationBox, PLC box) can be resized.");
+        LockDeep(o);
+        r["handle"] = Handle(o); r["clrType"] = t.Name; r["name"] = PropText(o, "Name");
+        try { double[] bb = BBoxOf(o); if (bb != null) r["bboxBefore"] = bb; } catch { }
+        PropertyInfo locP = RequireWritable(t, "Location");
+        try { r["locationBefore"] = PtDict(locP.GetValue(o, null)); } catch { }
+        Type pt = locP.PropertyType;
+        locP.SetValue(o, MakePoint(pt, bx0, by1), null);
+        Call(sla, o, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });
+        try { r["locationAfter"] = PtDict(locP.GetValue(o, null)); } catch { }
+        try { double[] bb = BBoxOf(o); if (bb != null) r["bboxAfter"] = bb; } catch { }
+        r["requested"] = new double[] { bx0, by0, bx1, by1 };
+    }
+
     static void OpRemove(object page, JObject a, Dictionary<string, string> labels, Dictionary<string, object> r)
     {
         List<string> refs = new List<string>();
@@ -817,6 +863,27 @@ _OPS_HELPERS = r'''
         r["handle"] = Handle(dcl);
     }
 
+    // A GraphicalLayer by name from the project's layer table (Layer is
+    // not an enum: Enum.Parse threw "El tipo proporcionado debe ser Enum").
+    static object LayerByName(object page, string name)
+    {
+        object project = TryRead(page, "Project", null);
+        object lt = project == null ? null : TryRead(project, "LayerTable", null);
+        if (lt == null) throw new Exception("Project.LayerTable is not available; cannot resolve layer '" + name + "'.");
+        PropertyInfo byName = lt.GetType().GetProperty("Layer", new Type[] { typeof(string) });
+        object lay = null;
+        try { lay = byName == null ? null : byName.GetValue(lt, new object[] { name }); } catch { lay = null; }
+        if (lay == null || PropText(lay, "isValid") == "False")
+        {
+            List<string> names = new List<string>();
+            object all = TryRead(lt, "Layers", null);
+            if (all != null) foreach (object l in (IEnumerable)all) if (l != null) names.Add(PropText(l, "Name") ?? "");
+            string shown = names.Count > 40 ? string.Join(", ", names.GetRange(0, 40).ToArray()) + " ... (" + names.Count + " layers)" : string.Join(", ", names.ToArray());
+            throw new Exception("No layer named '" + name + "'. Layers: " + shown);
+        }
+        return lay;
+    }
+
     static void OpText(object page, JObject a, Dictionary<string, object> r)
     {
         // Free text (Graphics.Text): the notes, titles and labels a page
@@ -842,8 +909,21 @@ _OPS_HELPERS = r'''
         }
         else
             Call(RequireMethod(tt, "Create", new string[] { "Page", "String", "Double" }, false), t, new object[] { page, content, height });
+        // A fresh text in a project that is not the GUI's current one is
+        // not write-locked: Location threw LockingException and the text
+        // stayed at (0,0) (P26009, 2026-11-06). Lock, and retry once more
+        // with SmartLock if the first write still refuses.
+        try { Lock(t); } catch { }
         PropertyInfo locP = RequireWritable(tt, "Location");
-        locP.SetValue(t, MakePoint(locP.PropertyType, D(a, "x", 0), D(a, "y", 0)), null);
+        object locV = MakePoint(locP.PropertyType, D(a, "x", 0), D(a, "y", 0));
+        try { locP.SetValue(t, locV, null); }
+        catch (Exception e1)
+        {
+            try { MethodInfo sm = tt.GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(t, null); } catch { }
+            try { Lock(t); } catch { }
+            try { locP.SetValue(t, locV, null); r["lockRetry"] = true; }
+            catch (Exception) { throw new Exception("Text.Location: " + Flatten(e1)); }
+        }
         if (Has(a, "angle")) RequireWritable(tt, "Rotation").SetValue(t, D(a, "angle", 0), null);
         if (Has(a, "justification"))
         {
@@ -851,7 +931,7 @@ _OPS_HELPERS = r'''
             try { j.SetValue(t, Enum.Parse(j.PropertyType, S(a, "justification", ""), true), null); }
             catch (Exception) { throw new Exception("Unknown justification '" + S(a, "justification", "") + "'. Valid: " + string.Join(", ", Enum.GetNames(j.PropertyType))); }
         }
-        if (Has(a, "layer")) { PropertyInfo lp = GetWritable(tt, "Layer"); if (lp != null) { object lay = Enum.Parse(lp.PropertyType, S(a, "layer", ""), true); lp.SetValue(t, lay, null); } }
+        if (Has(a, "layer")) { PropertyInfo lp = RequireWritable(tt, "Layer"); lp.SetValue(t, LayerByName(page, S(a, "layer", "")), null); r["layer"] = S(a, "layer", ""); }
         if (Has(a, "properties")) SetProps(t, (JObject)a["properties"], r);
         r["handle"] = Handle(t);
         try { r["text"] = Call(RequireMethod(tt, "GetDisplayString", new string[] { }, false), t, null); } catch { }
@@ -986,7 +1066,7 @@ _OPS_HELPERS = r'''
         else Call(create4, img, new object[] { page, resolved, p1, p2 });
         try { Lock(img); } catch { }
         try { PropertyInfo kp = GetWritable(it, "WidthToHeighRatioFix"); if (kp != null) kp.SetValue(img, keep, null); } catch { }
-        if (Has(a, "layer")) { PropertyInfo lp = GetWritable(it, "Layer"); if (lp != null) { object lay = Enum.Parse(lp.PropertyType, S(a, "layer", ""), true); lp.SetValue(img, lay, null); } }
+        if (Has(a, "layer")) { PropertyInfo lp = RequireWritable(it, "Layer"); lp.SetValue(img, LayerByName(page, S(a, "layer", "")), null); r["layer"] = S(a, "layer", ""); }
         if (Has(a, "properties")) SetProps(img, (JObject)a["properties"], r);
         r["handle"] = Handle(img);
         r["file"] = file;
@@ -1063,6 +1143,7 @@ _OPS_HELPERS = r'''
             case "structurebox": OpStructureBox(project, page, a, r); break;
             case "update": OpUpdate(project, page, a, labels, r); break;
             case "move": OpMove(page, a, labels, r); break;
+            case "resize": OpResize(page, a, labels, r); break;
             case "remove": OpRemove(page, a, labels, r); break;
             case "dimension": OpDimension(page, a, r); break;
             case "line": OpLine(page, a, r); break;
@@ -1070,7 +1151,7 @@ _OPS_HELPERS = r'''
             case "image": OpImage(page, a, labels, r); break;
             case "find": OpFind(page, a, r); break;
             case "read": OpRead(page, a, labels, r); break;
-            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, structurebox, update, move, remove, dimension, line, text, image, find, read.");
+            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, structurebox, update, move, resize, remove, dimension, line, text, image, find, read.");
         }
     }
 
@@ -1613,13 +1694,17 @@ def live_batch(page: str, operations: list, read_back: bool = False,
       update    ref, plus tag/visibleName/allowMerge/part/properties/
                 functionDefinition.
       move      ref, x, y.
+      resize    ref, x1, y1, x2, y2 - new corners of an existing box
+                (BoxedDevice, LocationBox, PLC box): Location becomes the
+                top-left corner so the texts follow; pins placed apart stay.
       remove    ref or refs[] (a group takes its sub-placements with it).
       dimension x1, y1, x2, y2, lineX, lineY.
       line      x1, y1, x2, y2 (horizontal or vertical connection line).
       text      x, y, text ("es_ES@..;en_US@..;" for bilingual), height=2.5,
                 angle?, justification? (a JustificationType name; the
-                error lists them), properties? - a free text that belongs
-                to no device (a note, a title, a legend).
+                error lists them), layer? (a GraphicalLayer name such as
+                "EPLAN400"), properties? - a free text that belongs to no
+                device (a note, a title, a legend).
       image     x1, y1, x2, y2 (the rectangle, any corner order), and ONE
                 of file ("$(MD_IMG)\\SMC\\x.jpg" or absolute), part (the
                 part's ARTICLE_PICTUREFILE) or ref (a device on the page:
@@ -1868,6 +1953,32 @@ def live_place_image(page: str, file: str = None, x1: float = 0.0, y1: float = 0
     op = {"op": "image", "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
           "keepAspect": bool(keep_aspect), "copyToProject": bool(copy_to_project)}
     _optional(op, file=file, part=part, ref=ref, layer=layer)
+    return _single(run_ops(page, [op], allow_real_project=allow_real_project,
+                           timeout_seconds=timeout_seconds))
+
+
+def live_resize_box(page: str, ref: str, x1: float, y1: float, x2: float, y2: float,
+                    allow_real_project: bool = False, timeout_seconds: float = 120.0) -> dict:
+    """
+    Give an existing box new corners. WRITES - scratch-only by default.
+
+    Works on any box that has a logical area: a black box (BoxedDevice,
+    SPECIAL/DC), a structure box (LocationBox) or a PLC box. Like resizing
+    in the GUI, the Location moves to the new top-left corner, so the tag
+    and function text (placed relative to it) move with the box; pins
+    placed apart (DCP) and everything else on the page stay where they are.
+
+    Args:
+        page: Page name.
+        ref: Handle, device tag ("=FIJ+CAMPO-B3") or "$label".
+        x1, y1, x2, y2: Two opposite corners in page mm (any order).
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "handle", "clrType", "name", "locationBefore",
+         "locationAfter", "bboxBefore", "bboxAfter", "requested"}
+    """
+    op = {"op": "resize", "ref": ref, "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
 

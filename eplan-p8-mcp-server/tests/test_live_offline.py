@@ -729,7 +729,7 @@ def test_assign_cable_connections_reassign_runs_after_conductors_exist(monkeypat
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
     assert len(scripts) == 1 and "if (false)" in scripts[0]
     scripts.clear()
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True, crossing_texts=False)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True, crossing_texts=False, pin_colours=None)
     assert len(scripts) == 2 and "if (false)" in scripts[0] and "if (true)" in scripts[1]
     assert "DoReassignWires" in scripts[1] and _string_literals_balanced(scripts[1])
     assert r["results"]["reassignedFromPart"] is True and r["results"]["connectionsGenerated"] == 2
@@ -798,6 +798,50 @@ def test_decorate_cable_crossings_script_and_passthrough(monkeypatch):
     calls.clear()
     cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
     assert calls == []
+
+
+def test_conductor_colours_by_pin_script(monkeypatch):
+    from api.actions import cables_live
+    captured = _capture(monkeypatch, cables_live)
+    cables_live.live_set_conductor_colours("+CE/2", INJECTION, pin_colours={"1": "BN", "4": "BK", "3": "BU"})
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert 'map["1"] = "BN";' in cs and 'map["4"] = "BK";' in cs and "bool auto = false;" in cs
+    assert 'PropText(p1o, "Designation")' in cs and 'SetProp(cp, "CONNECTION_WIRENUMBER", want);' in cs
+    cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="auto")
+    cs = captured["script"] if False else None  # _capture keeps the first script only
+    assert cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="nope")["success"] is False
+    assert cables_live._pin_map("sensor")[0]["3"] == "BU" and cables_live._pin_map("auto")[1] is True
+
+
+def test_decorate_style_and_pin_colours_passthrough(monkeypatch):
+    from api.actions import cables_live, generate
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_decorate_cable_crossings("+CE/2", "-W1", style={"rotation": 0, "docked": True, "section": False})
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "if (id == 31002 && !false)" in cs and '"IsDocked").SetValue(pp, true, null)' in cs and "if (!true)" in cs
+    assert cables_live.live_decorate_cable_crossings("+CE/2", "-W1", style={"bogus": 1})["success"] is False
+    calls = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {"success": True, "handle": "h", "cable": "=+CE-W1",
+                                                                            "crossed": [{"designation": "201", "assigned": "now"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "201"}]}]}})
+    monkeypatch.setattr(cables_live, "live_set_conductor_colours",
+                        lambda page, cable, **kw: calls.append(("pins", kw.get("pin_colours"))) or {"results": {"success": True, "conductors": []}})
+    monkeypatch.setattr(cables_live, "live_decorate_cable_crossings",
+                        lambda page, cable, **kw: calls.append(("decor", kw.get("style"))) or {"results": {"success": True}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True,
+                                                  crossing_style={"rotation": 0}, pin_colours={"1": "BN"})
+    assert calls == [("pins", {"1": "BN"}), ("decor", {"rotation": 0})]
+    assert r["results"]["pinColours"]["success"] is True
+    calls.clear()
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False)
+    assert calls == [("decor", None)], "no reassign from part: nothing to pair with pins"
 
 
 def test_copy_pages_keeps_subcounter(monkeypatch):

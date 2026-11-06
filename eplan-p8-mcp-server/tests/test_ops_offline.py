@@ -406,3 +406,29 @@ def test_macro_symbol_file_and_top_left_shift(one_shot):
     # top_left shifts the inserted objects instead of removing and re-inserting
     assert 'r["shifted"] = new double[] { dx, dy };' in cs
     assert "objs = InsertMacro(page, file, rep, v, x + dx, y + dy);" not in cs
+
+
+def test_text_locks_before_location_and_box_label(one_shot):
+    ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240)
+    cs = one_shot["script"]
+    i_create = cs.index('RequireMethod(tt, "Create", new string[] { "Page", "String", "Double" }, false)')
+    i_lock = cs.index("try { Lock(t); } catch { }", i_create)
+    i_loc = cs.index("try { locP.SetValue(t, locV, null); }", i_create)
+    assert i_create < i_lock < i_loc, "the text is locked before its Location is written"
+    assert 'GetWritable(lbT, "VisibleName").SetValue(lb, name, null); labelRoute = "VisibleName";' in cs
+    assert 'r["labelRoute"] = labelRoute;' in cs
+
+
+def test_resize_op_and_wrapper(one_shot):
+    out = ops.live_resize_box("=FIJ+CAMPO/10", "=FIJ+CAMPO-B3", 100, 150, 120, 176)
+    assert out["success"] is True
+    op = one_shot["request"]["ops"][0]
+    assert op["op"] == "resize" and op["ref"] == "=FIJ+CAMPO-B3"
+    assert (op["x1"], op["y1"], op["x2"], op["y2"]) == (100.0, 150.0, 120.0, 176.0)
+    cs = one_shot["script"]
+    assert 'case "resize": OpResize(page, a, labels, r); break;' in cs
+    # Location = new top-left first, then the logical area; nothing else is moved
+    i_loc = cs.index("locP.SetValue(o, MakePoint(pt, bx0, by1), null);")
+    i_sla = cs.index("Call(sla, o, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });")
+    assert i_loc < i_sla
+    assert 'r["bboxBefore"] = bb;' in cs and 'r["bboxAfter"] = bb;' in cs
