@@ -726,13 +726,78 @@ def test_assign_cable_connections_reassign_runs_after_conductors_exist(monkeypat
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
     monkeypatch.setattr(cables_live, "live_cables",
                         lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "201"}]}]}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
     assert len(scripts) == 1 and "if (false)" in scripts[0]
     scripts.clear()
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True, crossing_texts=False)
     assert len(scripts) == 2 and "if (false)" in scripts[0] and "if (true)" in scripts[1]
     assert "DoReassignWires" in scripts[1] and _string_literals_balanced(scripts[1])
     assert r["results"]["reassignedFromPart"] is True and r["results"]["connectionsGenerated"] == 2
+
+
+def test_place_cable_definition_applies_scheme_after_assign(monkeypatch):
+    from api.actions import cables_live, captions_live
+    calls = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {"success": True, "handle": "h1", "name": "=+CE-W1"}})
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections",
+                        lambda *a, **kw: calls.append(("assign", kw)) or {"results": {"success": True, "crossed": [], "conductors": []}})
+    monkeypatch.setattr(captions_live, "live_set_property_texts",
+                        lambda page, ref, **kw: calls.append(("texts", page, ref, kw)) or {"results": {"success": True, "scheme": kw.get("scheme")}})
+    r = cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, part="FES.541348",
+                                                scheme="Festo", show=["31004"])
+    assert [c[0] for c in calls] == ["assign", "texts"]
+    assert calls[0][1]["reassign_from_part"] is True
+    assert calls[1][1] == "+CE/2" and calls[1][2] == "h1"
+    assert calls[1][3]["scheme"] == "Festo" and calls[1][3]["show"] == ["31004"]
+    assert r["results"]["propertyTexts"]["scheme"] == "Festo"
+    # no scheme / show: the texts tool is not called
+    calls.clear()
+    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, generate=False)
+    assert calls == []
+
+
+def test_reassign_locks_conductors_before_doreassignwires(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False, reassign_from_part=True)
+    cs = scripts[0]
+    assert _string_literals_balanced(cs)
+    i_lock = cs.index('LockAny(TryRead(cc, "StartSymbolReference", null));')
+    i_call = cs.index("m.Invoke(csvc, new object[] { cable, true, excl });")
+    assert i_lock < i_call, "conductors and their ends are locked before DoReassignWires"
+    assert 'results["lockedConductors"] = lockedConductors;' in cs
+
+
+def test_decorate_cable_crossings_script_and_passthrough(monkeypatch):
+    from api.actions import cables_live, captions_live
+    captured = _capture(monkeypatch, cables_live)
+    cables_live.live_decorate_cable_crossings("+CE/2", INJECTION)
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert "GuardScratch(project, false" in cs
+    assert 'pl.GetType().Name != "ConnectionDefinitionPoint"' in cs
+    assert 'if (id != 31004 && id != 31002 && id != 20010) continue;' in cs
+    assert '"CONNECTION_WIRENUMBER", "CONNECTION_WIRECROSSSECTION", "CONNECTION_WIRECROSSSECTION_UNIT"' in cs
+    assert 'GetWritable(pl.GetType(), "Name").SetValue(pl, cableName, null);' in cs
+    # the assignment runs the decoration once conductors exist, and not when told not to
+    calls = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {"success": True, "handle": "h", "cable": "=+CE-W1",
+                                                                            "crossed": [{"designation": "201", "assigned": "now"}]}})
+    from api.actions import generate
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "201"}]}]}})
+    monkeypatch.setattr(cables_live, "live_decorate_cable_crossings",
+                        lambda page, cable, **kw: calls.append((page, cable)) or {"results": {"success": True, "crossingPoints": []}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True)
+    assert calls == [("+CE/2", "h")] and r["results"]["crossings"]["success"] is True
+    calls.clear()
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
+    assert calls == []
 
 
 def test_copy_pages_keeps_subcounter(monkeypatch):

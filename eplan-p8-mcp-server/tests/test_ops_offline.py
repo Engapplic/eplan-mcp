@@ -374,3 +374,35 @@ def test_macro_tags_every_device_without_self_clash(one_shot):
     # nested devices get the tag too; the part goes on the main functions only
     assert "CollectDevices(o, devObjs);" in cs
     assert "bool withPart = anyMain ? IsMainFunction(o) : Handle(o) == first;" in cs
+
+
+def test_image_op_and_wrapper(one_shot):
+    out = ops.live_place_image("=ST1+CAMPO/1", "$(MD_IMG)\\SMC\\D-M9PSAPC_001.jpg", 300, 200, 340, 170)
+    assert out["success"] is True
+    op = one_shot["request"]["ops"][0]
+    assert op["op"] == "image" and op["file"].startswith("$(MD_IMG)")
+    assert (op["x1"], op["y1"], op["x2"], op["y2"]) == (300.0, 200.0, 340.0, 170.0)
+    assert op["keepAspect"] is True and op["copyToProject"] is True and "part" not in op
+    cs = one_shot["script"]
+    assert 'case "image": OpImage(page, a, labels, r); break;' in cs
+    assert '"Eplan.EplApi.DataModel.Graphics.Image"' in cs
+    assert '"Eplan.EplApi.Base.PathMap"' in cs and '"SubstitutePath"' in cs
+    assert '"ARTICLE_PICTUREFILE"' in cs and '"WidthToHeighRatioFix"' in cs
+    # the picture of a part / of a device's part
+    ops.live_place_image("=ST1+CAMPO/1", None, 300, 200, 340, 170, part="SMC.D-M9PSAPC", keep_aspect=False)
+    op = one_shot["request"]["ops"][0]
+    assert op["part"] == "SMC.D-M9PSAPC" and "file" not in op and op["keepAspect"] is False
+    ops.live_place_image("=ST1+CAMPO/1", None, 300, 200, 340, 170, ref="=ST1+CAMPO-B1")
+    assert one_shot["request"]["ops"][0]["ref"] == "=ST1+CAMPO-B1"
+    assert ops.live_place_image("=ST1+CAMPO/1", None, 1, 2, 3, 4)["success"] is False
+
+
+def test_macro_symbol_file_and_top_left_shift(one_shot):
+    ops.live_insert_macro("=ST1+CAMPO/1", __file__, 60, 200, anchor="top_left", tag="=ST1+CAMPO-WG1")
+    cs = one_shot["script"]
+    # a .ems goes through Insert.SymbolMacro (WindowMacro refuses it)
+    assert 'file.EndsWith(".ems", StringComparison.OrdinalIgnoreCase)' in cs
+    assert 'm.Name == "SymbolMacro" && ps.Length == 7' in cs
+    # top_left shifts the inserted objects instead of removing and re-inserting
+    assert 'r["shifted"] = new double[] { dx, dy };' in cs
+    assert "objs = InsertMacro(page, file, rep, v, x + dx, y + dy);" not in cs
