@@ -350,6 +350,19 @@ _HELPERS_SCHEMATIC = r'''
         return d;
     }
 
+    // The brief form of ReadPage: what a caller needs to know that a write
+    // happened on a page it has already read in full.
+    static Dictionary<string, object> PageSummary(object page)
+    {
+        Dictionary<string, object> d = new Dictionary<string, object>();
+        d["page"] = PropText(page, "Name");
+        int n = 0;
+        foreach (object pl in PagePlacements(page)) if (pl != null) n++;
+        d["placementCount"] = n;
+        d["brief"] = true;
+        return d;
+    }
+
     static Dictionary<string, object> ReadPage(object page, int limit, bool withPins,
                                                string[] onlyTypes)
     {
@@ -1430,6 +1443,7 @@ def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
 
 def live_remove_placement(page: str, handle: str = None,
                           expect_type: str = None, remove_page: bool = False,
+                          brief: bool = False,
                           allow_real_project: bool = False,
                           timeout_seconds: float = 90.0) -> dict:
     """
@@ -1453,6 +1467,10 @@ def live_remove_placement(page: str, handle: str = None,
             instead of deleting the wrong object.
         remove_page: Remove the whole page and everything on it. Requires
             handle to be omitted, so it cannot happen by accident.
+        brief: Replace the page dumps (page_before / page_after, tens of
+            thousands of characters on a dense page) by their placement
+            counts: {"placementCount": n}. The removed object is still
+            reported in full.
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 90s.
 
@@ -1482,7 +1500,7 @@ def live_remove_placement(page: str, handle: str = None,
             object page = FindPage(project, PAGENAME);
             results["page"] = PropText(page, "Name");
             // Record what is about to be destroyed BEFORE destroying it.
-            results["page_before"] = ReadPage(page, 500, false, null);
+            results["page_before"] = BRIEF ? PageSummary(page) : ReadPage(page, 500, false, null);
             MethodInfo rm = RequireMethod(page.GetType(), "Remove", new string[] { }, false);
             Call(rm, page, null);
             results["pageRemoved"] = true;
@@ -1504,10 +1522,10 @@ def live_remove_placement(page: str, handle: str = None,
             results["removedType"] = target.GetType().Name;
             MethodInfo rm = RequireMethod(target.GetType(), "Remove", new string[] { }, false);
             Call(rm, target, null);
-            results["page_after"] = ReadPage(page, 200, false, null);
+            results["page_after"] = BRIEF ? PageSummary(page) : ReadPage(page, 200, false, null);
 '''
         body = _fill(body, HANDLE='"%s"' % handle_cs)
-    body = _fill(body, PAGENAME='"%s"' % page_cs)
+    body = _fill(body, PAGENAME='"%s"' % page_cs, BRIEF="true" if brief else "false")
 
     return _shape(_execute_script(
         _script(_cls("Remove"), body, extra_helpers=_HELPERS_SCHEMATIC),

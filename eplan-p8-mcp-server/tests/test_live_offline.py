@@ -743,3 +743,77 @@ def test_copy_pages_keeps_subcounter(monkeypatch):
     structure_live.live_copy_pages_to_structure(["+CE/2.a"], ["ST2"])
     cs = captured["script"]
     assert '"PAGE_SUBCOUNTER"' in cs and 'SetProp(ppl, "PAGE_SUBCOUNTER", sub)' in cs
+
+
+# ---------------------------------------------------------------------------
+# Property texts (captions_live) - the general form of the panel captions
+# ---------------------------------------------------------------------------
+
+def test_property_texts_read_is_guard_free(monkeypatch):
+    from api.actions import captions_live
+    captured = _capture(monkeypatch, captions_live)
+    captions_live.live_property_texts("=ST1+CAMPO/1", ref=INJECTION, with_schemes=True)
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert "GuardScratch(project," not in cs
+    assert "SchemeNames(pl)" in cs and '"PropertyPlacements"' in cs
+
+
+def test_set_property_texts_script_order(monkeypatch):
+    from api.actions import captions_live
+    captured = _capture(monkeypatch, captions_live)
+    captions_live.live_set_property_texts(
+        "=ST1+CAMPO/1", "-X01", scheme="Arriba a la izquierda, fuera 90", hide=["22002"],
+        positions={"20010": [60, 212]}, rotations={"20011": 90}, heights={"20010": 3.5},
+        justifications={"20010": "BottomLeft"})
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert "GuardScratch(project, false" in cs
+    # scheme first, local switch after (selecting a scheme resets UseLocal)
+    assert cs.index("SelectScheme(pl,") < cs.index('"UseLocalPropertyPlacements"')
+    # degrees in, radians to EPLAN; moves last
+    assert "* Math.PI / 180.0" in cs
+    assert cs.index('"Rotation"') < cs.index("measure-and-correct")
+    assert 'new string[] { "20010", "60.0", "212.0" }' in cs
+    assert 'new string[] { "20011", "90.0" }' in cs
+    assert 'new string[] { "20010", "BottomLeft" }' in cs
+    assert "bool anyEdit = true;" in cs
+
+
+def test_set_property_texts_rejects_bad_shapes():
+    from api.actions import captions_live
+    assert captions_live.live_set_property_texts("p", "-X1", positions={"20010": [1]})["success"] is False
+    assert captions_live.live_set_property_texts("p", "-X1", rotations=[90])["success"] is False
+    assert captions_live.live_set_property_texts("p", "-X1", heights={"20010": "big"})["success"] is False
+
+
+def test_panel_captions_report_rotation_height_and_suffix_match(monkeypatch):
+    panel_live, captured = _capture_panel(monkeypatch)
+    panel_live.live_panel_captions("+CE/0", ref="-X1")
+    cs = captured["script"]
+    assert 'd["rotation"]' in cs and 'd["height"]' in cs and 'd["justification"]' in cs
+    assert 'n.EndsWith(wanted)' in cs, "a bare -X1 must match =ST1+CAMPO-X1 as a suffix"
+
+
+def test_remove_placement_brief_mode(monkeypatch):
+    from api.actions import schematic
+    captured = _capture(monkeypatch, schematic)
+    schematic.live_remove_placement("+CE/2", handle="1/2/3/0", brief=True)
+    cs = captured["script"]
+    assert "true ? PageSummary(page) : ReadPage(page, 200, false, null)" in cs
+    captured.clear()
+    schematic.live_remove_placement("+CE/2", remove_page=True)
+    cs = captured["script"]
+    assert "false ? PageSummary(page) : ReadPage(page, 500, false, null)" in cs
+
+
+def test_assign_cable_connections_checks_name_parts_and_locks(monkeypatch):
+    from api.actions import cables_live
+    captured = _capture(monkeypatch, cables_live)
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False)
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert "static void LockAny(object o)" in cs
+    assert 'PropText(cnp, "FUNC_CODE")' in cs and "&& named)" in cs, \
+        "a connection linked to the line but without the cable's name parts is NOT 'already'"
+    assert "LockAny(sr1); LockAny(sr2);" in cs, "pre-existing connections need their ends locked on retry"

@@ -352,3 +352,25 @@ def test_duplicate_labels_same_wire_only():
     assert found[0]["gap_mm"] == 5.0
     # A label without text is nothing to compare.
     assert ops._duplicate_labels([lab("1", 0, 0, des=""), lab("2", 0, 2, des="")]) == []
+
+
+def test_structure_box_op_and_wrapper(one_shot):
+    out = ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240)
+    assert out["success"] is True
+    op = one_shot["request"]["ops"][0]
+    assert op["op"] == "structurebox" and op["name"] == "=ST1+CAMPO"
+    assert op["assignContents"] is True and op["symbol"] == "SC"
+    assert (op["x1"], op["y1"], op["x2"], op["y2"]) == (50.0, 150.0, 280.0, 240.0)
+    cs = one_shot["script"]
+    assert 'case "structurebox": OpStructureBox(project, page, a, r); break;' in cs
+    assert '"SetLogicalArea"' in cs and '"Eplan.EplApi.DataModel.LocationBox"' in cs
+
+
+def test_macro_tags_every_device_without_self_clash(one_shot):
+    ops.live_insert_macro("=ST1+CAMPO/1", __file__, 60, 200, tag="=ST1+CAMPO-K1", part="SMC.EX600")
+    cs = one_shot["script"]
+    # the macro's own objects never count as a clash for its tag
+    assert "if (own != null && own.Contains(Handle(pl))) continue;" in cs
+    # nested devices get the tag too; the part goes on the main functions only
+    assert "CollectDevices(o, devObjs);" in cs
+    assert "bool withPart = anyMain ? IsMainFunction(o) : Handle(o) == first;" in cs

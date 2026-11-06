@@ -39,12 +39,12 @@ Use one of these whenever you are unsure of an exact action name or parameter �
 
 ## 2. The local `eplan` action server
 
-It exposes **243 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **246 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
   `eplan_disconnect`, `eplan_list_extensions`.
-- **213 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
+- **216 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
   Includes `eplan_live_set_target_project` (pin every later call to one open
   project by its .elk path - reflection scripts then pick it from
   `ProjectManager.OpenProjects` and action wrappers fill an omitted
@@ -52,14 +52,17 @@ It exposes **243 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, update, move, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, find, read) (place / rect / macro / update /
+  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, find, read) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
   `eplan_live_place_device` (place + tag + part + properties + function
   definition in one go; terminals and PLC points fall back to the 2-arg
   Create automatically), `eplan_live_insert_macro` (a window macro by
-  insertion point or top-left corner, devices tagged), `eplan_live_place_panel_item`
+  insertion point or top-left corner, EVERY device it brought tagged - a PLC
+  box and its terminals share the tag, the part goes on the main function),
+  `eplan_live_place_structure_box` (=ST1+CAMPO box by two corners; the
+  devices inside are renamed to its structure), `eplan_live_place_panel_item`
   (the part's 2D macro, or EPLAN's rectangle fallback), `eplan_live_place_plc_point`
   (DI/DO/PS/CPS with the right FunctionDefinition), `eplan_live_place_terminal`,
   `eplan_live_update_placement` (tag/part/properties on an existing object; a
@@ -268,6 +271,12 @@ All of these exist as `eplan_*` tools:
   with their boxes in page mm; hide/show/move them and set the legend
   position, always on a LOCAL property arrangement so other items are not
   dragged along),
+  `eplan_live_property_texts` / `eplan_live_set_property_texts` (the same
+  for ANY placement on any page - a schematic black box, a terminal, a PLC
+  box: pick a property arrangement scheme by name, hide/show, move to a
+  top-left corner, rotate in degrees, set height and justification; the
+  dense-I/O recipe is tag above the box, function text vertical, cable and Y
+  texts hidden),
   `eplan_live_copy_pages_to_structure` (repeated stations: copy drawn
   pages to =ST2, =ST3 ... and retag every device on the copies, keeping the
   shared ones such as the CPU; wire numbers and PLC addresses are copied
@@ -284,7 +293,9 @@ All of these exist as `eplan_*` tools:
   line clear of the wire-number symbols) and
   `eplan_live_assign_cable_connections` (re-run the geometric assignment
   for a line placed by hand or moved: EPLAN does not assign conductors to
-  an API-placed line on its own),
+  an API-placed line on its own; a connection EPLAN linked to the line
+  without writing the cable into it is assigned too, and pre-existing
+  connections are locked with retries before the write),
   `eplan_live_project_templates` (the .zw9 basic projects / .ept templates
   under $(MD_TEMPLATES)) and `eplan_live_create_project` (new project from
   one of them via ProjectManager.CreateProject, left open and set as the
