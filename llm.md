@@ -39,12 +39,12 @@ Use one of these whenever you are unsure of an exact action name or parameter �
 
 ## 2. The local `eplan` action server
 
-It exposes **246 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **248 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
   `eplan_disconnect`, `eplan_list_extensions`.
-- **216 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
+- **218 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
   Includes `eplan_live_set_target_project` (pin every later call to one open
   project by its .elk path - reflection scripts then pick it from
   `ProjectManager.OpenProjects` and action wrappers fill an omitted
@@ -52,17 +52,23 @@ It exposes **246 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, find, read) (place / rect / macro / update /
+  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
   `eplan_live_place_device` (place + tag + part + properties + function
   definition in one go; terminals and PLC points fall back to the 2-arg
-  Create automatically), `eplan_live_insert_macro` (a window macro by
-  insertion point or top-left corner, EVERY device it brought tagged - a PLC
-  box and its terminals share the tag, the part goes on the main function),
+  Create automatically), `eplan_live_insert_macro` (a window macro .ema or a symbol macro .ems -
+  what a part's ARTICLE_GROUPSYMBOLMACRO names - by insertion point or
+  top-left corner (the inserted objects are shifted, never re-inserted),
+  EVERY device it brought tagged - a PLC box and its terminals share the
+  tag, the part goes on the main function),
   `eplan_live_place_structure_box` (=ST1+CAMPO box by two corners; the
-  devices inside are renamed to its structure), `eplan_live_place_panel_item`
+  devices inside are renamed to its structure), `eplan_live_place_image`
+  (the photo of a sensor or valve in a rectangle on the page: a file -
+  "$(MD_IMG)\\..." expands -, a part number (its picture from the parts
+  database) or a device on the page; aspect kept, copied into the project),
+  `eplan_live_place_panel_item`
   (the part's 2D macro, or EPLAN's rectangle fallback), `eplan_live_place_plc_point`
   (DI/DO/PS/CPS with the right FunctionDefinition), `eplan_live_place_terminal`,
   `eplan_live_update_placement` (tag/part/properties on an existing object; a
@@ -289,8 +295,15 @@ All of these exist as `eplan_*` tools:
   `eplan_live_cables` (cables with their conductors: wire number, colour,
   cross-section, source, target), `eplan_live_place_cable_definition`
   (draw the cable definition line across wires, name it with the page's
-  structure, then assign the crossed connections and regenerate; keep the
-  line clear of the wire-number symbols) and
+  structure, then assign the crossed connections and regenerate; with a
+  part the conductors take the part's colours and cross-sections, the
+  conductors locked first; `scheme` / `show` arrange the line's own
+  property texts; keep the line clear of the wire-number symbols),
+  `eplan_live_decorate_cable_crossings` (the zero-size "=+" connection
+  definition points EPLAN leaves on the line at each crossed wire are
+  named after the cable, given the conductor's colour / cross-section and
+  show them rotated 90 deg at the crossing like a manufacturer macro; run by
+  default from the two tools above, `crossing_texts=False` skips it) and
   `eplan_live_assign_cable_connections` (re-run the geometric assignment
   for a line placed by hand or moved: EPLAN does not assign conductors to
   an API-placed line on its own; a connection EPLAN linked to the line

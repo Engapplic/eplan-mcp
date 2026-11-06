@@ -246,15 +246,177 @@ _REASSIGN_TAIL = '''
                 foreach (MethodInfo mi in csT.GetMethods())
                     if (mi.Name == "DoReassignWires" && mi.GetParameters().Length == 3 && mi.GetParameters()[0].ParameterType.Name == "Function") m = mi;
                 if (m == null) throw new Exception("CableService.DoReassignWires(Function, bool, AnyPropertyId[]) not found.");
-                try { MethodInfo lk = MethodByShape(cable.GetType(), "LockObject", new string[] { }, false); if (lk != null) lk.Invoke(cable, null); } catch { }
+                // DoReassignWires writes into every conductor connection and
+                // its two ends: without the write locks it threw LockingException
+                // (object not locked for write access) on P26009 (2026-11-06).
+                LockAny(cable);
+                try { object pg0 = TryRead(cable, "Page", null); if (pg0 != null) LockAny(pg0); } catch { }
+                int lockedConductors = 0;
+                try
+                {
+                    object ccs = TryRead(cable, "CableConnections", null);
+                    if (ccs != null) foreach (object cc in (IEnumerable)ccs)
+                    {
+                        if (cc == null) continue;
+                        LockAny(cc);
+                        LockAny(TryRead(cc, "StartSymbolReference", null));
+                        LockAny(TryRead(cc, "EndSymbolReference", null));
+                        try { MethodInfo sm = cc.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(cc, null); } catch { }
+                        lockedConductors++;
+                    }
+                }
+                catch (Exception le) { errors.Add("lock conductors: " + Flatten(le)); }
+                results["lockedConductors"] = lockedConductors;
                 try { m.Invoke(csvc, new object[] { cable, true, excl }); results["reassignedFromPart"] = true; }
                 catch (Exception e) { results["reassignedFromPart"] = false; errors.Add("DoReassignWires: " + Flatten(e)); results["success"] = false; }
             }
 '''
 
 
+_DECORATE_BODY = """
+            // The crossing points: EPLAN puts a ConnectionDefinitionPoint of
+            // zero size, named "=+", on the line at every crossed wire. A
+            // manufacturer macro (Festo NEBU, 2026-11-06) names them after
+            // the cable, gives them the conductor's colour / cross-section
+            // and shows those two texts rotated 90 deg at the crossing. The
+            // same is done here.
+            object page = FindPage(project, "PAGENAME");
+            object cable = null;
+            foreach (object pl in PagePlacements(page))
+                if (pl != null && (Handle(pl) == "CABLENAME" || PropText(pl, "Name") == "CABLENAME") && pl.GetType().Name == "Cable") { cable = pl; break; }
+            if (cable == null) throw new Exception("No cable definition line '" + "CABLENAME" + "' on page " + "PAGENAME" + ".");
+            LockAny(page); LockAny(cable);
+            string cableName = PropText(cable, "Name") ?? "";
+            double cx1 = double.MaxValue, cx2 = double.MinValue, cy1 = double.MaxValue, cy2 = double.MinValue;
+            foreach (object p in (IEnumerable)cable.GetType().GetMethod("GetBoundingBox", Type.EmptyTypes).Invoke(cable, null))
+            {
+                double px = Convert.ToDouble(p.GetType().GetProperty("X").GetValue(p, null)), py = Convert.ToDouble(p.GetType().GetProperty("Y").GetValue(p, null));
+                cx1 = Math.Min(cx1, px); cx2 = Math.Max(cx2, px); cy1 = Math.Min(cy1, py); cy2 = Math.Max(cy2, py);
+            }
+            bool horizontal = (cx2 - cx1) >= (cy2 - cy1);
+            double cmid = horizontal ? (cy1 + cy2) / 2.0 : (cx1 + cx2) / 2.0;
+            // conductor -> where its wire runs (x for a horizontal line)
+            List<object[]> cond = new List<object[]>();
+            object ccs = TryRead(cable, "CableConnections", null);
+            if (ccs != null) foreach (object cc in (IEnumerable)ccs)
+            {
+                if (cc == null) continue;
+                object sr1 = TryRead(cc, "StartSymbolReference", null);
+                object l1 = sr1 == null ? null : TryRead(sr1, "Location", null);
+                if (l1 == null) continue;
+                double x1 = Convert.ToDouble(l1.GetType().GetProperty("X").GetValue(l1, null)), y1 = Convert.ToDouble(l1.GetType().GetProperty("Y").GetValue(l1, null));
+                object sp = TryRead(cc, "StartSymbolConnPoint", null);
+                object pl1 = sp == null ? null : TryRead(sp, "Location", null);
+                if (pl1 != null) { x1 += Convert.ToDouble(pl1.GetType().GetProperty("X").GetValue(pl1, null)); y1 += Convert.ToDouble(pl1.GetType().GetProperty("Y").GetValue(pl1, null)); }
+                cond.Add(new object[] { horizontal ? x1 : y1, cc });
+            }
+            List<Dictionary<string, object>> points = new List<Dictionary<string, object>>();
+            List<string> errors = new List<string>();
+            double rad90 = Math.PI / 2.0;
+            foreach (object pl in PagePlacements(page))
+            {
+                if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                object loc = TryRead(pl, "Location", null);
+                if (loc == null) continue;
+                double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+                bool onLine = horizontal ? (Math.Abs(ly - cmid) < 0.05 && lx >= cx1 - 0.05 && lx <= cx2 + 0.05)
+                                         : (Math.Abs(lx - cmid) < 0.05 && ly >= cy1 - 0.05 && ly <= cy2 + 0.05);
+                if (!onLine) continue;
+                string nm = PropText(pl, "Name") ?? "";
+                if (nm != "" && nm != "=+" && nm != cableName) continue;   // someone else's point
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(pl); d["at"] = horizontal ? lx : ly;
+                try
+                {
+                    LockAny(pl);
+                    object cc = null;
+                    foreach (object[] c in cond) if (Math.Abs((double)c[0] - (horizontal ? lx : ly)) < 0.05) { cc = c[1]; break; }
+                    if (nm != cableName) { try { GetWritable(pl.GetType(), "Name").SetValue(pl, cableName, null); d["named"] = true; } catch (Exception ne) { d["nameError"] = Flatten(ne); } }
+                    object props = TryRead(pl, "Properties", null);
+                    if (cc != null && props != null)
+                    {
+                        object cp = TryRead(cc, "Properties", null);
+                        foreach (string pn in new string[] { "CONNECTION_WIRENUMBER", "CONNECTION_WIRECROSSSECTION", "CONNECTION_WIRECROSSSECTION_UNIT" })
+                        {
+                            string v = cp == null ? null : PropText(cp, pn);
+                            if (string.IsNullOrEmpty(v)) continue;
+                            try { SetProp(props, pn, v); d[pn] = v; } catch (Exception pe) { d[pn + "_error"] = Flatten(pe); }
+                        }
+                    }
+                    else d["conductor"] = "none";
+                    // texts: colour (31004) and cross-section (31002) rotated 90 deg
+                    PropertyInfo ul = GetWritable(pl.GetType(), "UseLocalPropertyPlacements");
+                    if (ul != null && !(bool)ul.GetValue(pl, null)) { try { ul.SetValue(pl, true, null); } catch { } }
+                    object pps = TryRead(pl, "PropertyPlacements", null);
+                    int shown = 0;
+                    if (pps != null) foreach (object pp in (IEnumerable)pps)
+                    {
+                        if (pp == null) continue;
+                        object dp = TryRead(pp, "DisplayedProperty", null);
+                        int id = dp == null ? -1 : Convert.ToInt32(TryRead(dp, "AsInt", null) ?? -1);
+                        if (id != 31004 && id != 31002 && id != 20010) continue;
+                        LockAny(pp);
+                        if (id == 20010) { try { GetWritable(pp.GetType(), "IsVisible").SetValue(pp, false, null); } catch { } continue; }
+                        try { GetWritable(pp.GetType(), "IsVisible").SetValue(pp, true, null); } catch { }
+                        try { GetWritable(pp.GetType(), "IsDocked").SetValue(pp, false, null); } catch { }
+                        try { GetWritable(pp.GetType(), "Height").SetValue(pp, id == 31004 ? 1.8 : 1.3, null); } catch { }
+                        try { PropertyInfo jp = GetWritable(pp.GetType(), "Justification"); jp.SetValue(pp, Enum.Parse(jp.PropertyType, id == 31004 ? "BottomLeft" : "TopLeft", true), null); } catch { }
+                        try { GetWritable(pp.GetType(), "Rotation").SetValue(pp, rad90, null); } catch { }
+                        try { PropertyInfo lp = GetWritable(pp.GetType(), "Location"); lp.SetValue(pp, MakePoint(lp.PropertyType, 0.0, id == 31004 ? 1.5 : 0.5), null); } catch { }
+                        shown++;
+                    }
+                    d["texts"] = shown;
+                }
+                catch (Exception e) { d["error"] = Flatten(e); errors.Add(Flatten(e)); }
+                points.Add(d);
+            }
+            results["cable"] = cableName; results["handle"] = Handle(cable);
+            results["crossingPoints"] = points;
+            results["errors"] = errors; results["success"] = errors.Count == 0;
+"""
+
+
+def live_decorate_cable_crossings(page: str, cable: str, allow_real_project: bool = False,
+                                  timeout_seconds: float = 180.0) -> dict:
+    """
+    Show the conductor colour and cross-section at every crossing of a
+    cable definition line, the way a manufacturer macro does. WRITES.
+
+    EPLAN leaves a zero-size connection definition point named "=+" on the
+    line at each crossed wire. This names those points after the cable,
+    copies each conductor's colour / cross-section into them (after
+    reassign_from_part they come from the cable part), and turns on their
+    colour (31004) and cross-section (31002) texts rotated 90 degrees at the
+    crossing - "BN" above the line, "0,25" below (the point has no
+    "with unit" text to show). live_place_cable_definition and
+    live_assign_cable_connections run this by default (crossing_texts).
+
+    Args:
+        page: Page name.
+        cable: The cable's full name, short tag or handle.
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "cable", "handle", "crossingPoints": [{"handle", "at",
+         "named", "CONNECTION_WIRENUMBER", ..., "texts"}], "errors"}
+    """
+    try:
+        page = cs_text(page, "page")
+        cable = cs_text(cable, "cable")
+    except SchematicValueError as exc:
+        return _err(exc)
+    body = (_guard_prelude(allow_real_project)
+            + _DECORATE_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable)))
+    return _execute_script(
+        live._script("LiveCableDecor_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+
+
 def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                                   reassign_from_part: bool = False,
+                                  crossing_texts: bool = True,
                                   allow_real_project: bool = False,
                                   timeout_seconds: float = 180.0) -> dict:
     """
@@ -277,14 +439,20 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         reassign_from_part: Also run "Asignar conexiones" so the cable
             part's wire templates give the conductors their colour and
             cross-section (default False; the placing tool passes True when
-            a part is attached). Without a part it changes nothing.
+            a part is attached). Without a part it changes nothing. The
+            conductors and their two ends are write-locked first (it threw
+            "object not locked for write access" without).
+        crossing_texts: After generating, name the crossing points after
+            the cable and show colour / cross-section at each crossing
+            (live_decorate_cable_crossings; default True).
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 180.
 
     Returns:
         {"success", "cable", "handle", "orientation", "crossed": [{
         "designation", "source", "target", "assigned": "now"|"already"|
-        "failed"}], "errors", "conductors" (after generate)}.
+        "failed"}], "errors", "conductors" (after generate), "crossings"
+        (the decoration result)}.
     """
     try:
         page = cs_text(page, "page")
@@ -346,6 +514,14 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                 conductors = _read()
         res["connectionsGenerated"] = runs
         res["conductors"] = conductors
+        if crossing_texts and conductors:
+            dr = live_decorate_cable_crossings(page, res.get("handle") or cable,
+                                               allow_real_project=allow_real_project,
+                                               timeout_seconds=timeout_seconds)
+            d_res = dr.get("results") if isinstance(dr.get("results"), dict) else dr
+            res["crossings"] = d_res
+            if isinstance(d_res, dict) and not d_res.get("success"):
+                res["crossingsError"] = d_res.get("error") or d_res.get("errors")
     return r
 
 
@@ -353,7 +529,8 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                                 x2: float, y2: float, part: str = None,
                                 text: str = None, properties: dict = None,
                                 symbol: str = "CABDL", variant: int = 0,
-                                generate: bool = True,
+                                generate: bool = True, scheme: str = None,
+                                show: list = None, crossing_texts: bool = True,
                                 allow_real_project: bool = False,
                                 timeout_seconds: float = 180.0) -> dict:
     """
@@ -381,13 +558,25 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
         variant: Symbol variant (default 0).
         generate: Assign the crossed connections and regenerate (default
             True) - see live_assign_cable_connections; EPLAN does not do it
-            for an API-placed line. False places the bare line.
+            for an API-placed line. False places the bare line. With a
+            part, the conductors also take the part's colours and
+            cross-sections (reassign from part).
+        scheme: Property arrangement scheme for the line's texts, by name
+            (live_property_texts(..., with_schemes=True) lists them) - the
+            way to show the conductor colour at every crossing and the
+            "0,25 mm²" like a manufacturer macro does, when a scheme has it.
+        show: Property texts to make visible on the line, each a property
+            id or the displayed text (see live_set_property_texts).
+        crossing_texts: Show colour / cross-section at every crossing and
+            type / conductors / length under the tag, like a manufacturer
+            macro (default True; see live_decorate_cable_crossings).
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 180.
 
     Returns:
         {"success", "handle", "name", "page", "parts", "conductors": [...]} -
-        same shape as one entry of live_cables.
+        same shape as one entry of live_cables; "propertyTexts" when scheme
+        or show was given.
     """
     try:
         page = cs_text(page, "page")
@@ -452,6 +641,7 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
     if generate and isinstance(res, dict) and res.get("success"):
         a = live_assign_cable_connections(page, res.get("handle"), generate=True,
                                           reassign_from_part=bool(part),
+                                          crossing_texts=crossing_texts,
                                           allow_real_project=allow_real_project,
                                           timeout_seconds=timeout_seconds)
         a_res = a.get("results") if isinstance(a.get("results"), dict) else a
@@ -461,6 +651,17 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             res["connectionsGenerated"] = a_res.get("connectionsGenerated")
             if "reassignedFromPart" in a_res:
                 res["reassignedFromPart"] = a_res.get("reassignedFromPart")
+            if "crossings" in a_res:
+                res["crossings"] = a_res.get("crossings")
             if not a_res.get("success"):
                 res["assignError"] = a_res.get("error") or a_res.get("errors")
+    if (scheme or show) and isinstance(res, dict) and res.get("success") and res.get("handle"):
+        from .captions_live import live_set_property_texts
+        t = live_set_property_texts(page, res["handle"], scheme=scheme, show=show,
+                                    allow_real_project=allow_real_project,
+                                    timeout_seconds=timeout_seconds)
+        t_res = t.get("results") if isinstance(t.get("results"), dict) else t
+        res["propertyTexts"] = t_res
+        if isinstance(t_res, dict) and not t_res.get("success"):
+            res["propertyTextsError"] = t_res.get("error") or t_res.get("errors")
     return r

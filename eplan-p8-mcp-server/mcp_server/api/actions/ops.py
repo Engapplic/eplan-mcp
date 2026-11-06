@@ -539,19 +539,38 @@ _OPS_HELPERS = r'''
     {
         Type insType = FindType("Eplan.EplApi.HEServices.Insert");
         object ins = Activator.CreateInstance(insType);
+        // A .ems is a SYMBOL macro (what a part's ARTICLE_GROUPSYMBOLMACRO
+        // names - the Festo NEBU cable macros); WindowMacro refuses it
+        // ("no es una marco de ventanas"), SymbolMacro takes the same
+        // arguments plus a NumerationMode.
+        bool symbolMacro = file.EndsWith(".ems", StringComparison.OrdinalIgnoreCase);
         MethodInfo wm = null;
         foreach (MethodInfo m in insType.GetMethods())
         {
             ParameterInfo[] ps = m.GetParameters();
-            if (m.Name == "WindowMacro" && ps.Length == 6 && ps[0].ParameterType == typeof(string)) wm = m;
+            if (!symbolMacro && m.Name == "WindowMacro" && ps.Length == 6 && ps[0].ParameterType == typeof(string)) wm = m;
+            if (symbolMacro && m.Name == "SymbolMacro" && ps.Length == 7 && ps[0].ParameterType == typeof(string)) wm = m;
         }
-        if (wm == null) throw new Exception("Insert has no WindowMacro(string, RepresentationType, int, Page, PointD, MoveKind). " + MemberList(insType, true));
+        if (wm == null) throw new Exception("Insert has no " + (symbolMacro ? "SymbolMacro(string, RepresentationType, int, Page, PointD, MoveKind, NumerationMode)" : "WindowMacro(string, RepresentationType, int, Page, PointD, MoveKind)") + ". " + MemberList(insType, true));
         ParameterInfo[] wp = wm.GetParameters();
         object repVal;
         try { repVal = Enum.Parse(wp[1].ParameterType, rep); }
         catch (Exception) { throw new Exception("Unknown representation '" + rep + "'. Values: " + string.Join(", ", Enum.GetNames(wp[1].ParameterType))); }
         object move = Enum.Parse(wp[5].ParameterType, "Absolute");
-        object[] objs = (object[])Call(wm, ins, new object[] { file, repVal, v, page, MakePoint(wp[4].ParameterType, x, y), move });
+        object[] objs;
+        if (symbolMacro)
+        {
+            // NumerationMode: keep the macro's own names (the first value
+            // that says so; the enum names differ between versions).
+            Type nmT = wp[6].ParameterType;
+            object nm = null;
+            foreach (string cand in new string[] { "DontNumber", "DoNotNumber", "NoNumeration", "Keep" })
+                if (nm == null && Array.IndexOf(Enum.GetNames(nmT), cand) >= 0) nm = Enum.Parse(nmT, cand);
+            if (nm == null) nm = Enum.GetValues(nmT).GetValue(0);
+            objs = (object[])Call(wm, ins, new object[] { file, repVal, v, page, MakePoint(wp[4].ParameterType, x, y), move, nm });
+        }
+        else
+            objs = (object[])Call(wm, ins, new object[] { file, repVal, v, page, MakePoint(wp[4].ParameterType, x, y), move });
         if (objs == null || objs.Length == 0)
             throw new Exception("WindowMacro inserted nothing from '" + file + "' (representation " + rep + ", variant " + v + "). " +
                 "Check the file exists and has that representation/variant.");
@@ -663,19 +682,34 @@ _OPS_HELPERS = r'''
             double dx = x - bb[0], dy = y - bb[3];
             if (Math.Abs(dx) > 1e-6 || Math.Abs(dy) > 1e-6)
             {
-                // Remove only the first-level objects of the trial copy: a
-                // group takes its contents with it, and removing a child whose
-                // parent is already gone throws a LockingException.
-                HashSet<string> top = new HashSet<string>();
-                PropertyInfo flp = GetReadable(page.GetType(), "AllFirstLevelPlacements");
-                if (flp != null)
-                {
-                    object flv = flp.GetValue(page, null);
-                    if (flv != null) foreach (object pl in (IEnumerable)flv) if (pl != null) top.Add(Handle(pl));
-                }
+                // Shift what was inserted instead of removing it and
+                // inserting again: the removal of a macro whose objects sit
+                // in a group left an unnamed duplicate behind (P26009,
+                // 2026-11-06). Each object's outermost group moves once.
+                List<object> tops = new List<object>();
+                HashSet<string> seen = new HashSet<string>();
                 foreach (object o in objs)
-                    if (o != null && (top.Count == 0 || top.Contains(Handle(o)))) RemoveObject(o);
-                objs = InsertMacro(page, file, rep, v, x + dx, y + dy);
+                {
+                    if (o == null) continue;
+                    object t = o;
+                    for (int guard = 0; guard < 20; guard++)
+                    {
+                        object g = TryRead(t, "Group", null);
+                        if (g == null || PropText(g, "IsValid") == "False") break;
+                        t = g;
+                    }
+                    if (seen.Add(Handle(t))) tops.Add(t);
+                }
+                foreach (object t in tops)
+                {
+                    LockDeep(t);
+                    PropertyInfo locPi = RequireWritable(t.GetType(), "Location");
+                    Dictionary<string, object> cur = PtDict(locPi.GetValue(t, null));
+                    double cx = Convert.ToDouble(cur["x"]), cy = Convert.ToDouble(cur["y"]);
+                    locPi.SetValue(t, MakePoint(locPi.PropertyType, cx + dx, cy + dy), null);
+                }
+                r["shifted"] = new double[] { dx, dy };
+                r["movedObjects"] = tops.Count;
                 bb = BBoxOfAll(objs);
             }
         }
@@ -824,6 +858,147 @@ _OPS_HELPERS = r'''
         r["height"] = PropText(t, "Height");
     }
 
+    // ---- image -------------------------------------------------------------
+    // "$(MD_IMG)\SMC\x.jpg" -> an absolute path. PathMap.SubstitutePath is
+    // the EPLAN resolver for its own variables; a path without one is
+    // returned as-is.
+    static string ExpandPath(string f)
+    {
+        if (string.IsNullOrEmpty(f) || f.IndexOf("$(") < 0) return f;
+        Type pm = FindType("Eplan.EplApi.Base.PathMap");
+        if (pm == null) return f;
+        MethodInfo sub = pm.GetMethod("SubstitutePath", new Type[] { typeof(string) });
+        if (sub == null) return f;
+        object v = sub.Invoke(null, new object[] { f });
+        return v == null ? f : v.ToString();
+    }
+
+    // The picture the parts database stores for a part (ARTICLE_PICTUREFILE,
+    // "$(MD_IMG)\SMC\D-M9PSAPC_001.jpg"), with the variable still in it.
+    static string PictureOfPart(string partNr)
+    {
+        if (string.IsNullOrEmpty(partNr)) return null;
+        Type mt = FindType("Eplan.EplApi.MasterData.MDPartsManagement");
+        if (mt == null) throw new Exception("Eplan.EplApi.MasterData.MDPartsManagement not loaded.");
+        object mgmt = Activator.CreateInstance(mt);
+        MethodInfo open = mt.GetMethod("OpenDatabase", Type.EmptyTypes);
+        if (open == null) throw new Exception("MDPartsManagement has no OpenDatabase(). " + MemberList(mt, true));
+        object db = open.Invoke(mgmt, null);
+        try
+        {
+            object part = null;
+            MethodInfo gp = db.GetType().GetMethod("GetPart", new Type[] { typeof(string), typeof(string) });
+            if (gp != null) { try { part = gp.Invoke(db, new object[] { partNr, "" }); } catch { part = null; } }
+            if (part == null)
+            {
+                object all = TryRead(db, "Parts", null);
+                if (all != null) foreach (object pp in (IEnumerable)all)
+                    if (pp != null && PropText(pp, "PartNr") == partNr) { part = pp; break; }
+            }
+            if (part == null) throw new Exception("Part '" + partNr + "' is not in the parts database.");
+            object props = TryRead(part, "Properties", null);
+            string pic = props == null ? null : PropText(props, "ARTICLE_PICTUREFILE");
+            if (string.IsNullOrEmpty(pic)) throw new Exception("Part '" + partNr + "' has no picture file (ARTICLE_PICTUREFILE is empty).");
+            return pic;
+        }
+        finally
+        {
+            try { MethodInfo dsp = db.GetType().GetMethod("Dispose", Type.EmptyTypes); if (dsp != null) dsp.Invoke(db, null); } catch { }
+        }
+    }
+
+    // The first part number a device carries (its ArticleReferences).
+    static string PartOfDevice(object fn)
+    {
+        object ars = TryRead(fn, "ArticleReferences", null);
+        if (ars != null) foreach (object ar in (IEnumerable)ars)
+        {
+            if (ar == null) continue;
+            string pn = PropText(ar, "PartNr");
+            if (!string.IsNullOrEmpty(pn)) return pn;
+        }
+        return null;
+    }
+
+    static void OpImage(object page, JObject a, Dictionary<string, string> labels, Dictionary<string, object> r)
+    {
+        // Graphics.Image: Create(Page, file, PointD start, PointD end[, bool
+        // copyToProject, bool overWrite]) places it in the rectangle;
+        // WidthToHeighRatioFix keeps the aspect, GetPhysicalDimensionOfImage
+        // gives the file's own size so the rectangle can be shrunk to fit.
+        string file = S(a, "file", null);
+        string part = S(a, "part", null);
+        string source = "file";
+        if (string.IsNullOrEmpty(file) && string.IsNullOrEmpty(part) && Has(a, "ref"))
+        {
+            object dev = Resolve(page, Req(a, "ref"), labels);
+            part = PartOfDevice(dev);
+            if (string.IsNullOrEmpty(part)) throw new Exception("'" + Req(a, "ref") + "' carries no part, so it has no picture.");
+            source = "ref";
+        }
+        if (string.IsNullOrEmpty(file) && !string.IsNullOrEmpty(part)) { file = PictureOfPart(part); if (source == "file") source = "part"; }
+        if (string.IsNullOrEmpty(file)) throw new Exception("'file', 'part' or 'ref' is required.");
+        string resolved = ExpandPath(file);
+        if (!File.Exists(resolved))
+            throw new Exception("Image file not found: " + resolved + (resolved != file ? " (from " + file + ")" : ""));
+        double x1 = D(a, "x1", 0), y1 = D(a, "y1", 0), x2 = D(a, "x2", 0), y2 = D(a, "y2", 0);
+        double bx0 = Math.Min(x1, x2), bx1 = Math.Max(x1, x2), by0 = Math.Min(y1, y2), by1 = Math.Max(y1, y2);
+        if (bx1 - bx0 < 1e-6 || by1 - by0 < 1e-6) throw new Exception("x1,y1 / x2,y2 must span a rectangle (mm).");
+        bool keep = B(a, "keepAspect", true);
+        bool copy = B(a, "copyToProject", true);
+        Type it = FindType("Eplan.EplApi.DataModel.Graphics.Image");
+        if (it == null) throw new Exception("Eplan.EplApi.DataModel.Graphics.Image not loaded.");
+        object img = Activator.CreateInstance(it);
+        double[] phys = null;
+        if (keep)
+        {
+            try
+            {
+                MethodInfo gd = it.GetMethod("GetPhysicalDimensionOfImage", new Type[] { typeof(string) });
+                object pd = gd == null ? null : gd.Invoke(img, new object[] { resolved });
+                if (pd != null)
+                {
+                    Dictionary<string, object> d = PtDict(pd);
+                    if (d["x"] != null && d["y"] != null) phys = new double[] { Convert.ToDouble(d["x"]), Convert.ToDouble(d["y"]) };
+                }
+            }
+            catch { phys = null; }
+            if (phys != null && phys[0] > 1e-6 && phys[1] > 1e-6)
+            {
+                // Fit inside the rectangle, anchored at its top-left corner.
+                double sc = Math.Min((bx1 - bx0) / phys[0], (by1 - by0) / phys[1]);
+                double w = phys[0] * sc, h = phys[1] * sc;
+                bx1 = bx0 + w; by0 = by1 - h;
+            }
+        }
+        MethodInfo create6 = null, create4 = null;
+        foreach (MethodInfo m in it.GetMethods())
+        {
+            if (m.Name != "Create") continue;
+            ParameterInfo[] ps = m.GetParameters();
+            if (ps.Length == 6 && ps[1].ParameterType == typeof(string)) create6 = m;
+            if (ps.Length == 4 && ps[1].ParameterType == typeof(string)) create4 = m;
+        }
+        if (create6 == null && create4 == null) throw new Exception("Image has no Create(Page, string, PointD, PointD). " + MemberList(it, true));
+        Type pt = (create6 ?? create4).GetParameters()[2].ParameterType;
+        object p1 = MakePoint(pt, bx0, by0), p2 = MakePoint(pt, bx1, by1);
+        if (create6 != null) Call(create6, img, new object[] { page, resolved, p1, p2, copy, true });
+        else Call(create4, img, new object[] { page, resolved, p1, p2 });
+        try { Lock(img); } catch { }
+        try { PropertyInfo kp = GetWritable(it, "WidthToHeighRatioFix"); if (kp != null) kp.SetValue(img, keep, null); } catch { }
+        if (Has(a, "layer")) { PropertyInfo lp = GetWritable(it, "Layer"); if (lp != null) { object lay = Enum.Parse(lp.PropertyType, S(a, "layer", ""), true); lp.SetValue(img, lay, null); } }
+        if (Has(a, "properties")) SetProps(img, (JObject)a["properties"], r);
+        r["handle"] = Handle(img);
+        r["file"] = file;
+        r["resolvedFile"] = resolved;
+        r["storedFile"] = PropText(img, "FileName");
+        r["source"] = source;
+        if (!string.IsNullOrEmpty(part)) r["part"] = part;
+        if (phys != null) r["imageSize"] = new double[] { phys[0], phys[1] };
+        r["bbox"] = new double[] { bx0, by0, bx1, by1 };
+        try { double[] bb = BBoxOf(img); if (bb != null) r["placedBbox"] = bb; } catch { }
+    }
+
     static void OpFind(object page, JObject a, Dictionary<string, object> r)
     {
         string name = S(a, "name", null), contains = S(a, "contains", null), type = S(a, "type", null);
@@ -892,9 +1067,10 @@ _OPS_HELPERS = r'''
             case "dimension": OpDimension(page, a, r); break;
             case "line": OpLine(page, a, r); break;
             case "text": OpText(page, a, r); break;
+            case "image": OpImage(page, a, labels, r); break;
             case "find": OpFind(page, a, r); break;
             case "read": OpRead(page, a, labels, r); break;
-            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, update, move, remove, dimension, line, text, find, read.");
+            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, structurebox, update, move, remove, dimension, line, text, image, find, read.");
         }
     }
 
@@ -1444,6 +1620,11 @@ def live_batch(page: str, operations: list, read_back: bool = False,
                 angle?, justification? (a JustificationType name; the
                 error lists them), properties? - a free text that belongs
                 to no device (a note, a title, a legend).
+      image     x1, y1, x2, y2 (the rectangle, any corner order), and ONE
+                of file ("$(MD_IMG)\\SMC\\x.jpg" or absolute), part (the
+                part's ARTICLE_PICTUREFILE) or ref (a device on the page:
+                its part's picture); keepAspect=true (shrunk to fit,
+                anchored top-left), copyToProject=true, layer?, properties?
       find      name? contains? type? firstLevel? limit?  (read-only)
       read      ref, pins=true                             (read-only)
 
@@ -1593,7 +1774,7 @@ def live_insert_macro(page: str, macro_file: str, x: float, y: float,
         representation: "MultiLine" for schematics, "ArticlePlacement" for
             the panel layout, "SingleLine", "Overview", "Graphics", ...
         anchor: "insertion" places the macro's own insertion point at (x, y);
-            "top_left" measures the macro, removes it and inserts it again so
+            "top_left" measures the macro once inserted and shifts it so
             its top-left corner lands at (x, y) - what a panel layout needs.
         tag: Device tag for the devices the macro created (all of them: a
             panel macro's devices are one part).
@@ -1643,6 +1824,50 @@ def live_place_structure_box(page: str, name: str, x1: float, y1: float, x2: flo
     op = {"op": "structurebox", "name": name, "x1": float(x1), "y1": float(y1),
           "x2": float(x2), "y2": float(y2), "assignContents": bool(assign_contents), "symbol": symbol}
     _optional(op, properties=properties)
+    return _single(run_ops(page, [op], allow_real_project=allow_real_project,
+                           timeout_seconds=timeout_seconds))
+
+
+def live_place_image(page: str, file: str = None, x1: float = 0.0, y1: float = 0.0,
+                     x2: float = 0.0, y2: float = 0.0, keep_aspect: bool = True,
+                     part: str = None, ref: str = None, copy_to_project: bool = True,
+                     layer: str = None, allow_real_project: bool = False,
+                     timeout_seconds: float = 120.0) -> dict:
+    """
+    Put an image on a page inside a rectangle - the small photo of a sensor
+    or a valve next to its symbol. WRITES - scratch-only by default.
+
+    The picture comes from ONE of: `file` (a path; EPLAN variables such as
+    "$(MD_IMG)\\SMC\\D-M9PSAPC_001.jpg" are expanded), `part` (the part's
+    ARTICLE_PICTUREFILE from the parts database) or `ref` (a device on the
+    page: the picture of its first part). With keep_aspect the image is
+    shrunk to fit the rectangle keeping its proportions, anchored at the
+    rectangle's top-left corner; the result's "bbox" is the area it
+    actually covers. copy_to_project (default) copies the file into the
+    project's Images folder, as the GUI's insert dialog does, so the
+    project stays portable.
+
+    Args:
+        page: Page name.
+        file: Image path, absolute or with an EPLAN variable.
+        x1, y1, x2, y2: Two opposite corners in page mm (any order).
+        keep_aspect: Keep the picture's proportions (default True).
+        part: Part number whose picture to use (when file is omitted).
+        ref: Device tag / handle on the page whose part's picture to use.
+        copy_to_project: Copy the file into the project (default True).
+        layer: Graphical layer name (e.g. "EPLAN400"), optional.
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "handle", "file", "resolvedFile", "storedFile", "source"
+         ("file" | "part" | "ref"), "part"?, "imageSize"? [w, h],
+         "bbox": [x0, y0, x1, y1], "placedBbox"?, "engine"}
+    """
+    if not (file or part or ref):
+        return {"success": False, "error": "live_place_image needs file, part or ref."}
+    op = {"op": "image", "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
+          "keepAspect": bool(keep_aspect), "copyToProject": bool(copy_to_project)}
+    _optional(op, file=file, part=part, ref=ref, layer=layer)
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
 
