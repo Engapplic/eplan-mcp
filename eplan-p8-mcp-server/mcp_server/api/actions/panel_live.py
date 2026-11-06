@@ -60,6 +60,10 @@ _HELPERS_PANEL = r'''
             d["text"] = t ?? "";
             object vv = TryRead(pp, "IsVisible", null); d["visible"] = vv == null ? true : (bool)vv;
             object dk = TryRead(pp, "IsDocked", null); d["docked"] = dk == null ? (object)null : (bool)dk;
+            // Rotation is stored in RADIANS (writing 90 reads back 2.035 = 90 mod 2pi); reported in degrees.
+            try { object rt = TryRead(pp, "Rotation", null); if (rt != null) d["rotation"] = Math.Round(Convert.ToDouble(rt) * 180.0 / Math.PI, 2); } catch { }
+            try { object ht = TryRead(pp, "Height", null); if (ht != null) d["height"] = Convert.ToDouble(ht); } catch { }
+            try { object ju = TryRead(pp, "Justification", null); if (ju != null) d["justification"] = ju.ToString(); } catch { }
             try
             {
                 object tl = TryRead(pp, "Location", null);
@@ -118,6 +122,16 @@ _HELPERS_PANEL = r'''
             if (h == wanted) { hits.Clear(); hits.Add(pl); return hits; }
             string n = PropText(pl, "Name") ?? ""; string v = PropText(pl, "VisibleName") ?? "";
             if (n == wanted || v == wanted) hits.Add(pl);
+        }
+        if (hits.Count == 0 && wanted.StartsWith("-"))
+        {
+            // "-X01" names "=ST1+CAMPO-X01" when no placement carries the bare tag.
+            foreach (object pl in PagePlacements(page))
+            {
+                if (pl == null) continue;
+                string n = PropText(pl, "Name") ?? "";
+                if (n.EndsWith(wanted) && n.Length > wanted.Length && "=+&".IndexOf(n[0]) >= 0) hits.Add(pl);
+            }
         }
         return hits;
     }

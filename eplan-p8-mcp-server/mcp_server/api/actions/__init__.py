@@ -218,6 +218,7 @@ from .ops import (
     live_find_placements,
     live_place_device,
     live_insert_macro,
+    live_place_structure_box,
     live_place_panel_item,
     live_place_plc_point,
     live_place_terminal,
@@ -354,6 +355,11 @@ from .introspect import (
 from .panel_live import (
     live_panel_captions,
     live_set_panel_captions,
+)
+
+from .captions_live import (
+    live_property_texts,
+    live_set_property_texts,
 )
 
 from .structure_live import (
@@ -506,6 +512,7 @@ __all__ = [
     # Target project + batched page operations
     'live_set_target_project',
     'live_batch', 'live_find_placements', 'live_place_device', 'live_insert_macro',
+    'live_place_structure_box',
     'live_place_panel_item', 'live_place_plc_point', 'live_place_terminal',
     'live_update_placement', 'live_render_page', 'live_check_page',
     # PLC
@@ -553,6 +560,7 @@ __all__ = [
     'live_report_types', 'live_create_report',
     'live_copy_pages_to_structure',
     'live_panel_captions', 'live_set_panel_captions',
+    'live_property_texts', 'live_set_property_texts',
     'live_terminal_strips', 'live_set_terminal_strip_definition',
     'live_cables', 'live_place_cable_definition', 'live_assign_cable_connections',
     'live_project_templates', 'live_create_project',

@@ -297,6 +297,13 @@ _OPS_HELPERS = r'''
     // ---- shared post-steps: tag, part, properties, function definition ----
     static void SetTag(object page, object fn, string tag, string visibleName, bool allowMerge,
                        Dictionary<string, object> r)
+    { SetTag(page, fn, tag, visibleName, allowMerge, r, null); }
+
+    // `own`: handles that may already carry the tag without being a clash -
+    // the other objects of the macro this one came from (a PLC box and its
+    // terminals are ONE device and share the tag on purpose).
+    static void SetTag(object page, object fn, string tag, string visibleName, bool allowMerge,
+                       Dictionary<string, object> r, HashSet<string> own)
     {
         if (!allowMerge)
         {
@@ -305,6 +312,7 @@ _OPS_HELPERS = r'''
             foreach (object pl in PagePlacements(page))
             {
                 if (pl == null || Handle(pl) == me) continue;
+                if (own != null && own.Contains(Handle(pl))) continue;
                 if (PropText(pl, "Name") == tag) clash.Add(pl.GetType().Name + "=" + Handle(pl));
             }
             if (clash.Count > 0)
@@ -391,12 +399,33 @@ _OPS_HELPERS = r'''
     }
 
     static void Finish(object project, object page, object fn, JObject a, Dictionary<string, object> r)
+    { Finish(project, page, fn, a, r, null, true); }
+
+    static void Finish(object project, object page, object fn, JObject a, Dictionary<string, object> r,
+                       HashSet<string> own, bool withPart)
     {
         Lock(fn);   // a fresh PotentialDefinition refuses property writes until locked
         if (Has(a, "functionDefinition")) SetFunctionDefinition(project, fn, (JObject)a["functionDefinition"], r);
-        if (Has(a, "tag")) SetTag(page, fn, Req(a, "tag"), S(a, "visibleName", null), B(a, "allowMerge", false), r);
-        if (Has(a, "part")) AddPart(fn, Req(a, "part"), r);
+        if (Has(a, "tag")) SetTag(page, fn, Req(a, "tag"), S(a, "visibleName", null), B(a, "allowMerge", false), r, own);
+        if (withPart && Has(a, "part")) AddPart(fn, Req(a, "part"), r);
         if (Has(a, "properties")) SetProps(fn, (JObject)a["properties"], r);
+    }
+
+    // Every device object a macro brought in, including those nested in its
+    // groups: the tag goes on all of them, not only the first-level ones.
+    static void CollectDevices(object o, List<object> into)
+    {
+        if (o == null) return;
+        if (IsDevice(o)) into.Add(o);
+        object subs = TryRead(o, "SubPlacements", null);
+        if (subs == null) return;
+        foreach (object s in (IEnumerable)subs) if (s != null) CollectDevices(s, into);
+    }
+
+    static bool IsMainFunction(object o)
+    {
+        try { object v = TryRead(o, "IsMainFunction", null); return v == null ? true : (bool)v; }
+        catch { return true; }
     }
 
     // ---- symbols -----------------------------------------------------------
@@ -554,6 +583,68 @@ _OPS_HELPERS = r'''
         }
     }
 
+    static void OpStructureBox(object project, object page, JObject a, Dictionary<string, object> r)
+    {
+        // Structure box ("caja de estructura", LocationBox): a SPECIAL/SC
+        // symbol reference whose name is a pure structure ("=ST1+CAMPO").
+        // Verified on 2026.0.3: Create(Page, SymbolVariant) then
+        // SetLogicalArea(p1, p2) gives it its two corners; Name takes the
+        // structure. EPLAN does NOT re-assign the devices already inside to
+        // the box's structure through the API (the GUI does on insert), so
+        // assignContents=true (default) renames every device whose location
+        // falls inside the box: "=A+B-K1:3" -> "<box>-K1:3".
+        string name = Req(a, "name");
+        if (name.IndexOf('-') >= 0 || (name.IndexOf('=') < 0 && name.IndexOf('+') < 0))
+            throw new Exception("'name' must be a structure only, like '=ST1+CAMPO' or '+CAMPO' (no '-' device part).");
+        double x1 = D(a, "x1", 0), y1 = D(a, "y1", 0), x2 = D(a, "x2", 0), y2 = D(a, "y2", 0);
+        if (Math.Abs(x2 - x1) < 1 || Math.Abs(y2 - y1) < 1) throw new Exception("The box needs two distinct corners (x1,y1)-(x2,y2) at least 1 mm apart.");
+        double bx0 = Math.Min(x1, x2), bx1 = Math.Max(x1, x2), by0 = Math.Min(y1, y2), by1 = Math.Max(y1, y2);
+        Type lbT = FindType("Eplan.EplApi.DataModel.LocationBox");
+        object variant = MakeVariant(project, S(a, "library", "SPECIAL"), S(a, "symbol", "SC"), I(a, "variant", 0));
+        object lb = Activator.CreateInstance(lbT);
+        MethodInfo cr = RequireMethod(lbT, "Create", new string[] { "Page", "SymbolVariant" }, false);
+        Call(cr, lb, new object[] { page, variant });
+        Lock(lb);
+        PropertyInfo locP = RequireWritable(lbT, "Location");
+        Type pt = locP.PropertyType;
+        locP.SetValue(lb, MakePoint(pt, bx0, by1), null);
+        MethodInfo sla = RequireMethod(lbT, "SetLogicalArea", new string[] { "PointD", "PointD" }, false);
+        Call(sla, lb, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });
+        GetWritable(lbT, "Name").SetValue(lb, name, null);
+        if (Has(a, "properties")) SetProps(lb, (JObject)a["properties"], r);
+        r["handle"] = Handle(lb);
+        r["name"] = PropText(lb, "Name");
+        r["bbox"] = new double[] { bx0, by0, bx1, by1 };
+        if (B(a, "assignContents", true))
+        {
+            List<object> renamed = new List<object>();
+            string me = Handle(lb);
+            List<object> devs = new List<object>();
+            foreach (object pl in PagePlacements(page)) if (pl != null && Handle(pl) != me) CollectDevices(pl, devs);
+            foreach (object o in devs)
+            {
+                if (o.GetType().Name == "LocationBox") continue;
+                object lo = TryRead(o, "Location", null);
+                if (lo == null) continue;
+                Dictionary<string, object> ld = PtDict(lo);
+                double ox = Convert.ToDouble(ld["x"]), oy = Convert.ToDouble(ld["y"]);
+                if (ox < bx0 || ox > bx1 || oy < by0 || oy > by1) continue;
+                string old = PropText(o, "Name") ?? "";
+                int dash = old.IndexOf('-');
+                if (dash < 0) continue;
+                string want = name + old.Substring(dash);
+                if (want == old) continue;
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(o); d["from"] = old;
+                try { Lock(o); GetWritable(o.GetType(), "Name").SetValue(o, want, null); d["to"] = PropText(o, "Name"); }
+                catch (Exception e) { d["error"] = Flatten(e); }
+                renamed.Add(d);
+            }
+            r["renamed"] = renamed;
+        }
+        r["placed"] = DumpPlacement(lb, false);
+    }
+
     static void OpMacro(object project, object page, JObject a, Dictionary<string, object> r)
     {
         string file = Req(a, "file");
@@ -593,16 +684,22 @@ _OPS_HELPERS = r'''
         List<string> handles = new List<string>();
         List<object> devices = new List<object>();
         string first = null;
-        foreach (object o in objs)
+        List<object> devObjs = new List<object>();
+        foreach (object o in objs) { if (o != null) handles.Add(Handle(o)); CollectDevices(o, devObjs); }
+        HashSet<string> own = new HashSet<string>();
+        foreach (object o in devObjs) own.Add(Handle(o));
+        // The part goes on the main functions only (a PLC card: the box, not
+        // its 20 terminals); with no main function among them, on the first.
+        bool anyMain = false;
+        foreach (object o in devObjs) if (IsMainFunction(o)) { anyMain = true; break; }
+        foreach (object o in devObjs)
         {
-            if (o == null) continue;
-            handles.Add(Handle(o));
-            if (!IsDevice(o)) continue;
             if (first == null) first = Handle(o);
             Dictionary<string, object> d = new Dictionary<string, object>();
             d["handle"] = Handle(o);
             d["clrType"] = o.GetType().Name;
-            Finish(project, page, o, a, d);
+            bool withPart = anyMain ? IsMainFunction(o) : Handle(o) == first;
+            Finish(project, page, o, a, d, own, withPart);
             d["name"] = PropText(o, "Name");
             object fd = TryRead(o, "FunctionDefinition", null);
             if (fd != null) d["functionDefinitionName"] = PropText(fd, "Name");
@@ -788,6 +885,7 @@ _OPS_HELPERS = r'''
             case "place": OpPlace(project, page, a, r); break;
             case "rect": OpRect(project, page, a, r); break;
             case "macro": OpMacro(project, page, a, r); break;
+            case "structurebox": OpStructureBox(project, page, a, r); break;
             case "update": OpUpdate(project, page, a, labels, r); break;
             case "move": OpMove(page, a, labels, r); break;
             case "remove": OpRemove(page, a, labels, r); break;
@@ -1333,6 +1431,9 @@ def live_batch(page: str, operations: list, read_back: bool = False,
       macro     file, x, y, variant=0, representation=MultiLine
                 (ArticlePlacement for panels), anchor="insertion"|"top_left",
                 plus tag/part applied to every device the macro created.
+      structurebox  name ("=ST1+CAMPO": structure only), x1, y1, x2, y2
+                (two corners), assignContents=true (devices whose location
+                is inside take the box's = / +), properties?, symbol=SC.
       update    ref, plus tag/visibleName/allowMerge/part/properties/
                 functionDefinition.
       move      ref, x, y.
@@ -1506,6 +1607,42 @@ def live_insert_macro(page: str, macro_file: str, x: float, y: float,
     op = {"op": "macro", "file": macro_file, "x": float(x), "y": float(y), "variant": int(variant_nr),
           "representation": representation, "anchor": anchor}
     _optional(op, tag=tag, part=part)
+    return _single(run_ops(page, [op], allow_real_project=allow_real_project,
+                           timeout_seconds=timeout_seconds))
+
+
+def live_place_structure_box(page: str, name: str, x1: float, y1: float, x2: float, y2: float,
+                             assign_contents: bool = True, properties: dict = None,
+                             symbol: str = "SC", allow_real_project: bool = False,
+                             timeout_seconds: float = 120.0) -> dict:
+    """
+    Draw a structure box ("caja de estructura") with two corners and give
+    its = / + to the devices inside. WRITES - scratch-only by default.
+
+    The box is a LocationBox (SPECIAL/SC) whose name is a pure structure.
+    EPLAN's GUI re-assigns the devices inside when the box is inserted; the
+    API does not, so with assign_contents=True (default) every device whose
+    location falls inside the rectangle is renamed to the box's structure
+    ("=TST+CAMPO-K1:3" -> "=ST1+CAMPO-K1:3"), and the result lists them.
+    Devices placed INSIDE the box afterwards do not inherit it: name them
+    with the structure yourself (tag "=ST1+CAMPO-X01").
+
+    Args:
+        page: Page name.
+        name: "=ST1+CAMPO", "+CAMPO" ... - no "-" device part.
+        x1, y1, x2, y2: Two opposite corners in page mm (any order).
+        assign_contents: Rename the devices inside (default True).
+        properties: Extra properties {NAME: value} for the box.
+        symbol: SPECIAL symbol (default "SC").
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "handle", "name", "bbox": [x0, y0, x1, y1],
+         "renamed": [{"handle", "from", "to"}], "placed", "engine"}
+    """
+    op = {"op": "structurebox", "name": name, "x1": float(x1), "y1": float(y1),
+          "x2": float(x2), "y2": float(y2), "assignContents": bool(assign_contents), "symbol": symbol}
+    _optional(op, properties=properties)
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
 

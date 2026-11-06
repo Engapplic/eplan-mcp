@@ -118,9 +118,18 @@ def live_cables(contains: str = None, timeout_seconds: float = 120.0) -> dict:
 '''
     return _execute_script(
         live._script("LiveCables_" + uuid.uuid4().hex[:6], body,
-                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM),
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
         timeout=timeout_seconds,
     )
+
+
+_HELPERS_CABLE = r'''
+    static void LockAny(object o)
+    {
+        if (o == null) return;
+        try { MethodInfo lk = o.GetType().GetMethod("LockObject", Type.EmptyTypes); if (lk != null) lk.Invoke(o, null); } catch { }
+    }
+'''
 
 
 _ASSIGN_BODY = '''
@@ -143,7 +152,10 @@ _ASSIGN_BODY = '''
             }
             bool horizontal = (cx2 - cx1) >= (cy2 - cy1);
             double cmid = horizontal ? (cy1 + cy2) / 2.0 : (cx1 + cx2) / 2.0;
+            LockAny(page); LockAny(cable);
             object cableParts = TryRead(cable, "NameParts", null);
+            string wantCode = cableParts == null ? "" : (PropText(cableParts, "FUNC_CODE") ?? "");
+            string wantCnt = cableParts == null ? "" : (PropText(cableParts, "FUNC_COUNTER") ?? "");
             Type finderType = FindType("Eplan.EplApi.DataModel.DMObjectsFinder");
             object finder = Activator.CreateInstance(finderType, new object[] { project });
             Type cfT = FindType("Eplan.EplApi.DataModel.ConnectionsFilter");
@@ -176,15 +188,39 @@ _ASSIGN_BODY = '''
                 Dictionary<string, object> d = new Dictionary<string, object>();
                 d["designation"] = cp == null ? "" : (PropText(cp, "CONNECTION_DESIGNATION") ?? "");
                 d["source"] = PropText(sr1, "Name"); d["target"] = PropText(sr2, "Name");
+                // "already" only when the connection is linked to THIS line
+                // AND carries the cable's name parts: EPLAN links a connection
+                // to a line it touches without writing the cable into it, and
+                // that half-state showed up as 0 conductors on the cable list.
                 object already = TryRead(cn, "CableDefinitionLine", null);
-                if (already != null && Handle(already) == Handle(cable)) { d["assigned"] = "already"; assigned.Add(d); continue; }
-                try
+                object cnp = TryRead(cn, "CableNameParts", null);
+                string haveCode = cnp == null ? "" : (PropText(cnp, "FUNC_CODE") ?? "");
+                string haveCnt = cnp == null ? "" : (PropText(cnp, "FUNC_COUNTER") ?? "");
+                bool named = haveCode != "" && haveCode == wantCode && haveCnt == wantCnt;
+                if (already != null && Handle(already) == Handle(cable) && named) { d["assigned"] = "already"; assigned.Add(d); continue; }
+                d["linkedBefore"] = already != null && Handle(already) == Handle(cable);
+                string lastErr = null;
+                for (int attempt = 0; attempt < 3 && lastErr == null && !d.ContainsKey("assigned"); attempt++)
                 {
-                    try { MethodInfo lk = MethodByShape(cn.GetType(), "LockObject", new string[] { }, false); if (lk != null) lk.Invoke(cn, null); } catch { }
-                    GetWritable(cn.GetType(), "CableNameParts").SetValue(cn, cableParts, null);
-                    d["assigned"] = "now";
+                    try
+                    {
+                        // LockObject is declared on StorableObject; GetMethod walks
+                        // the base types (MethodByShape does not), and a connection
+                        // that existed before the line needs its two ends locked too.
+                        LockAny(cn);
+                        if (attempt >= 1) { LockAny(sr1); LockAny(sr2); try { MethodInfo sm = cn.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(cn, null); } catch { } }
+                        GetWritable(cn.GetType(), "CableNameParts").SetValue(cn, cableParts, null);
+                        d["assigned"] = "now";
+                        if (attempt > 0) d["lockRetries"] = attempt;
+                    }
+                    catch (Exception e)
+                    {
+                        string msg = Flatten(e);
+                        if (attempt < 2 && msg.IndexOf("lock", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                        lastErr = msg;
+                    }
                 }
-                catch (Exception e) { d["assigned"] = "failed"; errors.Add((string)d["designation"] + ": " + Flatten(e)); }
+                if (lastErr != null) { d["assigned"] = "failed"; errors.Add((string)d["designation"] + ": " + lastErr); }
                 assigned.Add(d);
             }
             results["cable"] = PropText(cable, "Name");
@@ -261,7 +297,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                 + _REASSIGN_TAIL.replace("REASSIGN", "true" if reassign else "false"))
         return _execute_script(
             live._script("LiveCableAssign_" + uuid.uuid4().hex[:6], body,
-                         extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM),
+                         extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
             timeout=timeout_seconds,
         )
 
@@ -409,7 +445,7 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
 '''
     r = _execute_script(
         live._script("LiveCableDef_" + uuid.uuid4().hex[:6], body,
-                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM),
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
         timeout=timeout_seconds,
     )
     res = r.get("results") if isinstance(r.get("results"), dict) else r
