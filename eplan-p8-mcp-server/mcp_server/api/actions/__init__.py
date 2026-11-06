@@ -220,6 +220,7 @@ from .ops import (
     live_insert_macro,
     live_place_structure_box,
     live_place_image,
+    live_resize_box,
     live_place_panel_item,
     live_place_plc_point,
     live_place_terminal,
@@ -515,7 +516,7 @@ __all__ = [
     # Target project + batched page operations
     'live_set_target_project',
     'live_batch', 'live_find_placements', 'live_place_device', 'live_insert_macro',
-    'live_place_structure_box', 'live_place_image',
+    'live_place_structure_box', 'live_place_image', 'live_resize_box',
     'live_place_panel_item', 'live_place_plc_point', 'live_place_terminal',
     'live_update_placement', 'live_render_page', 'live_check_page',
     # PLC

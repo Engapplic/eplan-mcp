@@ -39,12 +39,12 @@ Use one of these whenever you are unsure of an exact action name or parameter �
 
 ## 2. The local `eplan` action server
 
-It exposes **249 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **250 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
   `eplan_disconnect`, `eplan_list_extensions`.
-- **219 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
+- **220 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
   Includes `eplan_live_set_target_project` (pin every later call to one open
   project by its .elk path - reflection scripts then pick it from
   `ProjectManager.OpenProjects` and action wrappers fill an omitted
@@ -52,7 +52,7 @@ It exposes **249 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
+  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
@@ -68,7 +68,9 @@ It exposes **249 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   (the photo of a sensor or valve in a rectangle on the page: a file -
   "$(MD_IMG)\\..." expands -, a part number (its picture from the parts
   database) or a device on the page; aspect kept, copied into the project),
-  `eplan_live_place_panel_item`
+  `eplan_live_resize_box` (new corners for a box that already exists; the
+  Location follows to the top-left so its texts move, pins placed apart
+  stay), `eplan_live_place_panel_item`
   (the part's 2D macro, or EPLAN's rectangle fallback), `eplan_live_place_plc_point`
   (DI/DO/PS/CPS with the right FunctionDefinition), `eplan_live_place_terminal`,
   `eplan_live_update_placement` (tag/part/properties on an existing object; a

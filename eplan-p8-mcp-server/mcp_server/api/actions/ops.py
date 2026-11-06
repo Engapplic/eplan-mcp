@@ -791,6 +791,33 @@ _OPS_HELPERS = r'''
         r["placed"] = DumpPlacement(o, false);
     }
 
+    static void OpResize(object page, JObject a, Dictionary<string, string> labels, Dictionary<string, object> r)
+    {
+        // Resize a box that already exists (BoxedDevice, LocationBox, PLC
+        // box: any SymbolReference with SetLogicalArea). Like the GUI, the
+        // Location becomes the new top-left corner, so the texts that hang
+        // off it move with the box; pins placed apart (DCP) stay where
+        // they are, as the GUI leaves them (P26009, 2026-11-06).
+        object o = Resolve(page, Req(a, "ref"), labels);
+        double x1 = D(a, "x1", 0), y1 = D(a, "y1", 0), x2 = D(a, "x2", 0), y2 = D(a, "y2", 0);
+        if (Math.Abs(x2 - x1) < 1 || Math.Abs(y2 - y1) < 1) throw new Exception("The box needs two distinct corners (x1,y1)-(x2,y2) at least 1 mm apart.");
+        double bx0 = Math.Min(x1, x2), bx1 = Math.Max(x1, x2), by0 = Math.Min(y1, y2), by1 = Math.Max(y1, y2);
+        Type t = o.GetType();
+        MethodInfo sla = MethodByShape(t, "SetLogicalArea", new string[] { "PointD", "PointD" }, false);
+        if (sla == null) throw new Exception("A " + t.Name + " has no SetLogicalArea(PointD, PointD): only boxes (BoxedDevice, LocationBox, PLC box) can be resized.");
+        LockDeep(o);
+        r["handle"] = Handle(o); r["clrType"] = t.Name; r["name"] = PropText(o, "Name");
+        try { double[] bb = BBoxOf(o); if (bb != null) r["bboxBefore"] = bb; } catch { }
+        PropertyInfo locP = RequireWritable(t, "Location");
+        try { r["locationBefore"] = PtDict(locP.GetValue(o, null)); } catch { }
+        Type pt = locP.PropertyType;
+        locP.SetValue(o, MakePoint(pt, bx0, by1), null);
+        Call(sla, o, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });
+        try { r["locationAfter"] = PtDict(locP.GetValue(o, null)); } catch { }
+        try { double[] bb = BBoxOf(o); if (bb != null) r["bboxAfter"] = bb; } catch { }
+        r["requested"] = new double[] { bx0, by0, bx1, by1 };
+    }
+
     static void OpRemove(object page, JObject a, Dictionary<string, string> labels, Dictionary<string, object> r)
     {
         List<string> refs = new List<string>();
@@ -1116,6 +1143,7 @@ _OPS_HELPERS = r'''
             case "structurebox": OpStructureBox(project, page, a, r); break;
             case "update": OpUpdate(project, page, a, labels, r); break;
             case "move": OpMove(page, a, labels, r); break;
+            case "resize": OpResize(page, a, labels, r); break;
             case "remove": OpRemove(page, a, labels, r); break;
             case "dimension": OpDimension(page, a, r); break;
             case "line": OpLine(page, a, r); break;
@@ -1123,7 +1151,7 @@ _OPS_HELPERS = r'''
             case "image": OpImage(page, a, labels, r); break;
             case "find": OpFind(page, a, r); break;
             case "read": OpRead(page, a, labels, r); break;
-            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, structurebox, update, move, remove, dimension, line, text, image, find, read.");
+            default: throw new Exception("Unknown op '" + kind + "'. Known: place, rect, macro, structurebox, update, move, resize, remove, dimension, line, text, image, find, read.");
         }
     }
 
@@ -1666,6 +1694,9 @@ def live_batch(page: str, operations: list, read_back: bool = False,
       update    ref, plus tag/visibleName/allowMerge/part/properties/
                 functionDefinition.
       move      ref, x, y.
+      resize    ref, x1, y1, x2, y2 - new corners of an existing box
+                (BoxedDevice, LocationBox, PLC box): Location becomes the
+                top-left corner so the texts follow; pins placed apart stay.
       remove    ref or refs[] (a group takes its sub-placements with it).
       dimension x1, y1, x2, y2, lineX, lineY.
       line      x1, y1, x2, y2 (horizontal or vertical connection line).
@@ -1922,6 +1953,32 @@ def live_place_image(page: str, file: str = None, x1: float = 0.0, y1: float = 0
     op = {"op": "image", "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
           "keepAspect": bool(keep_aspect), "copyToProject": bool(copy_to_project)}
     _optional(op, file=file, part=part, ref=ref, layer=layer)
+    return _single(run_ops(page, [op], allow_real_project=allow_real_project,
+                           timeout_seconds=timeout_seconds))
+
+
+def live_resize_box(page: str, ref: str, x1: float, y1: float, x2: float, y2: float,
+                    allow_real_project: bool = False, timeout_seconds: float = 120.0) -> dict:
+    """
+    Give an existing box new corners. WRITES - scratch-only by default.
+
+    Works on any box that has a logical area: a black box (BoxedDevice,
+    SPECIAL/DC), a structure box (LocationBox) or a PLC box. Like resizing
+    in the GUI, the Location moves to the new top-left corner, so the tag
+    and function text (placed relative to it) move with the box; pins
+    placed apart (DCP) and everything else on the page stay where they are.
+
+    Args:
+        page: Page name.
+        ref: Handle, device tag ("=FIJ+CAMPO-B3") or "$label".
+        x1, y1, x2, y2: Two opposite corners in page mm (any order).
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "handle", "clrType", "name", "locationBefore",
+         "locationAfter", "bboxBefore", "bboxAfter", "requested"}
+    """
+    op = {"op": "resize", "ref": ref, "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
 
