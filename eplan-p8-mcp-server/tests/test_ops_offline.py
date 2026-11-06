@@ -406,3 +406,14 @@ def test_macro_symbol_file_and_top_left_shift(one_shot):
     # top_left shifts the inserted objects instead of removing and re-inserting
     assert 'r["shifted"] = new double[] { dx, dy };' in cs
     assert "objs = InsertMacro(page, file, rep, v, x + dx, y + dy);" not in cs
+
+
+def test_text_locks_before_location_and_box_label(one_shot):
+    ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240)
+    cs = one_shot["script"]
+    i_create = cs.index('RequireMethod(tt, "Create", new string[] { "Page", "String", "Double" }, false)')
+    i_lock = cs.index("try { Lock(t); } catch { }", i_create)
+    i_loc = cs.index("try { locP.SetValue(t, locV, null); }", i_create)
+    assert i_create < i_lock < i_loc, "the text is locked before its Location is written"
+    assert 'GetWritable(lbT, "VisibleName").SetValue(lb, name, null); labelRoute = "VisibleName";' in cs
+    assert 'r["labelRoute"] = labelRoute;' in cs

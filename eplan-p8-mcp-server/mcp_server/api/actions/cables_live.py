@@ -283,7 +283,11 @@ _DECORATE_BODY = """
             object page = FindPage(project, "PAGENAME");
             object cable = null;
             foreach (object pl in PagePlacements(page))
-                if (pl != null && (Handle(pl) == "CABLENAME" || PropText(pl, "Name") == "CABLENAME") && pl.GetType().Name == "Cable") { cable = pl; break; }
+            {
+                if (pl == null || pl.GetType().Name != "Cable") continue;
+                string cn = PropText(pl, "Name") ?? "";
+                if (Handle(pl) == "CABLENAME" || cn == "CABLENAME" || ("CABLENAME".StartsWith("-") && cn.EndsWith("CABLENAME") && cn.Length > "CABLENAME".Length)) { cable = pl; break; }
+            }
             if (cable == null) throw new Exception("No cable definition line '" + "CABLENAME" + "' on page " + "PAGENAME" + ".");
             LockAny(page); LockAny(cable);
             string cableName = PropText(cable, "Name") ?? "";
@@ -312,7 +316,6 @@ _DECORATE_BODY = """
             }
             List<Dictionary<string, object>> points = new List<Dictionary<string, object>>();
             List<string> errors = new List<string>();
-            double rad90 = Math.PI / 2.0;
             foreach (object pl in PagePlacements(page))
             {
                 if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
@@ -357,12 +360,16 @@ _DECORATE_BODY = """
                         if (id != 31004 && id != 31002 && id != 20010) continue;
                         LockAny(pp);
                         if (id == 20010) { try { GetWritable(pp.GetType(), "IsVisible").SetValue(pp, false, null); } catch { } continue; }
+                        if (id == 31002 && !STYLE_SECTION) { try { GetWritable(pp.GetType(), "IsVisible").SetValue(pp, false, null); } catch { } continue; }
                         try { GetWritable(pp.GetType(), "IsVisible").SetValue(pp, true, null); } catch { }
-                        try { GetWritable(pp.GetType(), "IsDocked").SetValue(pp, false, null); } catch { }
-                        try { GetWritable(pp.GetType(), "Height").SetValue(pp, id == 31004 ? 1.8 : 1.3, null); } catch { }
-                        try { PropertyInfo jp = GetWritable(pp.GetType(), "Justification"); jp.SetValue(pp, Enum.Parse(jp.PropertyType, id == 31004 ? "BottomLeft" : "TopLeft", true), null); } catch { }
-                        try { GetWritable(pp.GetType(), "Rotation").SetValue(pp, rad90, null); } catch { }
-                        try { PropertyInfo lp = GetWritable(pp.GetType(), "Location"); lp.SetValue(pp, MakePoint(lp.PropertyType, 0.0, id == 31004 ? 1.5 : 0.5), null); } catch { }
+                        try { GetWritable(pp.GetType(), "IsDocked").SetValue(pp, STYLE_DOCKED, null); } catch { }
+                        try { GetWritable(pp.GetType(), "Height").SetValue(pp, id == 31004 ? STYLE_HEIGHT : STYLE_SECTION_HEIGHT, null); } catch { }
+                        if (!STYLE_DOCKED)
+                        {
+                            try { PropertyInfo jp = GetWritable(pp.GetType(), "Justification"); jp.SetValue(pp, Enum.Parse(jp.PropertyType, id == 31004 ? "BottomLeft" : "TopLeft", true), null); } catch { }
+                            try { GetWritable(pp.GetType(), "Rotation").SetValue(pp, STYLE_ROT_RAD, null); } catch { }
+                            try { PropertyInfo lp = GetWritable(pp.GetType(), "Location"); lp.SetValue(pp, MakePoint(lp.PropertyType, 0.0, id == 31004 ? 1.5 : 0.5), null); } catch { }
+                        }
                         shown++;
                     }
                     d["texts"] = shown;
@@ -376,7 +383,181 @@ _DECORATE_BODY = """
 """
 
 
-def live_decorate_cable_crossings(page: str, cable: str, allow_real_project: bool = False,
+# M8 / M12 sensor connector pins (IEC 61076-2-101 / -104): what a NEBU or a
+# D-M9 lead carries on each pin. Used when `pin_colours` is "sensor" or
+# "auto".
+SENSOR_PIN_COLOURS = {"1": "BN", "2": "WH", "3": "BU", "4": "BK", "5": "GY"}
+
+_PINFIX_BODY = """
+            // "Asignar conexiones" hands the part's wire templates to the
+            // conductors in template order, not by pin: a NEBU-M8G3 (1 BN,
+            // 4 BK, 3 BU) crossed left to right as pins 1, 3, 4 came out
+            // BN, BK, BU (P26009, 2026-11-06). The templates carry no pin,
+            // so the pairing is a map pin -> colour applied to every
+            // conductor whose end pin is in the map.
+            object page = FindPage(project, "PAGENAME");
+            object cable = null;
+            foreach (object pl in PagePlacements(page))
+            {
+                if (pl == null || pl.GetType().Name != "Cable") continue;
+                string cn = PropText(pl, "Name") ?? "";
+                if (Handle(pl) == "CABLENAME" || cn == "CABLENAME" || ("CABLENAME".StartsWith("-") && cn.EndsWith("CABLENAME") && cn.Length > "CABLENAME".Length)) { cable = pl; break; }
+            }
+            if (cable == null) throw new Exception("No cable definition line '" + "CABLENAME" + "' on page " + "PAGENAME" + ".");
+            LockAny(page); LockAny(cable);
+            Dictionary<string, string> map = new Dictionary<string, string>();
+MAPROWS
+            bool auto = AUTO;
+            List<Dictionary<string, object>> rows = new List<Dictionary<string, object>>();
+            List<string> errors = new List<string>();
+            object ccs = TryRead(cable, "CableConnections", null);
+            List<object> conds = new List<object>();
+            if (ccs != null) foreach (object cc in (IEnumerable)ccs) if (cc != null) conds.Add(cc);
+            if (auto)
+            {
+                // only when every conductor already carries a sensor-lead
+                // colour (the part IS a sensor lead); anything else is left alone
+                HashSet<string> allowed = new HashSet<string>(map.Values);
+                foreach (object cc in conds)
+                {
+                    object cp0 = TryRead(cc, "Properties", null);
+                    string col = cp0 == null ? "" : (PropText(cp0, "CONNECTION_WIRENUMBER") ?? "");
+                    if (col == "" || !allowed.Contains(col)) { results["skipped"] = "conductor colour '" + col + "' is not a sensor-lead colour; pass pin_colours explicitly"; results["success"] = true; results["conductors"] = rows; return; }
+                }
+            }
+            foreach (object cc in conds)
+            {
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                try
+                {
+                    object cp = TryRead(cc, "Properties", null);
+                    d["designation"] = cp == null ? "" : (PropText(cp, "CONNECTION_DESIGNATION") ?? "");
+                    d["before"] = cp == null ? "" : (PropText(cp, "CONNECTION_WIRENUMBER") ?? "");
+                    object sp = TryRead(cc, "StartSymbolConnPoint", null), ep = TryRead(cc, "EndSymbolConnPoint", null);
+                    // the pin designation lives on StartPin / EndPin (what live_read_connections reports)
+                    object p1o = TryRead(cc, "StartPin", null), p2o = TryRead(cc, "EndPin", null);
+                    string pin1 = p1o == null ? "" : (PropText(p1o, "Designation") ?? ""), pin2 = p2o == null ? "" : (PropText(p2o, "Designation") ?? "");
+                    d["pins"] = new string[] { pin1, pin2 };
+                    // The pin that counts is the DEVICE's (the sensor's M8
+                    // 1/3/4), not the terminal's (a terminal has pins 1/2
+                    // too): prefer the end that is not a Terminal.
+                    object sr1 = TryRead(cc, "StartSymbolReference", null), sr2 = TryRead(cc, "EndSymbolReference", null);
+                    bool t1 = sr1 != null && sr1.GetType().Name == "Terminal", t2 = sr2 != null && sr2.GetType().Name == "Terminal";
+                    string[] order = (t1 && !t2) ? new string[] { pin2, pin1 } : new string[] { pin1, pin2 };
+                    string want = null, pin = null;
+                    foreach (string cand in order) if (want == null && map.ContainsKey(cand)) { want = map[cand]; pin = cand; }
+                    if (want == null) { d["result"] = "no pin in map"; rows.Add(d); continue; }
+                    d["pin"] = pin; d["colour"] = want; d["pinSide"] = pin == pin1 ? "start" : "end";
+                    if ((string)d["before"] == want) { d["result"] = "already"; rows.Add(d); continue; }
+                    LockAny(cc);
+                    LockAny(sr1); LockAny(sr2);
+                    int written = 0;
+                    try { SetProp(cp, "CONNECTION_WIRENUMBER", want); written++; } catch (Exception e1) { d["connectionError"] = Flatten(e1); }
+                    // the connection definition points on this wire (the
+                    // rotulo and the line crossing) define the colour too
+                    object l1 = sr1 == null ? null : TryRead(sr1, "Location", null), l2 = sr2 == null ? null : TryRead(sr2, "Location", null);
+                    if (l1 != null && l2 != null)
+                    {
+                        double x1 = Convert.ToDouble(l1.GetType().GetProperty("X").GetValue(l1, null)), y1 = Convert.ToDouble(l1.GetType().GetProperty("Y").GetValue(l1, null));
+                        double x2 = Convert.ToDouble(l2.GetType().GetProperty("X").GetValue(l2, null)), y2 = Convert.ToDouble(l2.GetType().GetProperty("Y").GetValue(l2, null));
+                        object pl1 = sp == null ? null : TryRead(sp, "Location", null), pl2 = ep == null ? null : TryRead(ep, "Location", null);
+                        if (pl1 != null) { x1 += Convert.ToDouble(pl1.GetType().GetProperty("X").GetValue(pl1, null)); y1 += Convert.ToDouble(pl1.GetType().GetProperty("Y").GetValue(pl1, null)); }
+                        if (pl2 != null) { x2 += Convert.ToDouble(pl2.GetType().GetProperty("X").GetValue(pl2, null)); y2 += Convert.ToDouble(pl2.GetType().GetProperty("Y").GetValue(pl2, null)); }
+                        int cdps = 0;
+                        foreach (object pl in PagePlacements(page))
+                        {
+                            if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                            object loc = TryRead(pl, "Location", null);
+                            if (loc == null) continue;
+                            double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+                            bool on = Math.Abs(x1 - x2) < 0.01
+                                ? (Math.Abs(lx - x1) < 0.05 && ly >= Math.Min(y1, y2) - 0.05 && ly <= Math.Max(y1, y2) + 0.05)
+                                : (Math.Abs(y1 - y2) < 0.01 && Math.Abs(ly - y1) < 0.05 && lx >= Math.Min(x1, x2) - 0.05 && lx <= Math.Max(x1, x2) + 0.05);
+                            if (!on) continue;
+                            try { LockAny(pl); SetProp(TryRead(pl, "Properties", null), "CONNECTION_WIRENUMBER", want); cdps++; } catch (Exception e2) { d["cdpError"] = Flatten(e2); }
+                        }
+                        d["pointsWritten"] = cdps;
+                    }
+                    d["result"] = written > 0 ? "set" : "failed";
+                    if (written == 0) errors.Add((string)d["designation"] + ": " + d["connectionError"]);
+                }
+                catch (Exception e) { d["error"] = Flatten(e); errors.Add(Flatten(e)); }
+                rows.Add(d);
+            }
+            results["cable"] = PropText(cable, "Name"); results["handle"] = Handle(cable);
+            results["conductors"] = rows; results["errors"] = errors; results["success"] = errors.Count == 0;
+"""
+
+
+def _pin_map(pin_colours):
+    """{pin: colour} from the tool argument; None when nothing applies."""
+    if pin_colours is None or pin_colours is False:
+        return None, False
+    if isinstance(pin_colours, str):
+        if pin_colours.lower() in ("sensor", "m8", "m12"):
+            return dict(SENSOR_PIN_COLOURS), False
+        if pin_colours.lower() == "auto":
+            return dict(SENSOR_PIN_COLOURS), True
+        raise SchematicValueError("pin_colours must be 'auto', 'sensor' or {pin: colour}.")
+    if isinstance(pin_colours, dict) and pin_colours:
+        return {str(k): str(v) for k, v in pin_colours.items()}, False
+    raise SchematicValueError("pin_colours must be 'auto', 'sensor' or {pin: colour}.")
+
+
+def live_set_conductor_colours(page: str, cable: str, pin_colours="sensor",
+                               allow_real_project: bool = False,
+                               timeout_seconds: float = 180.0) -> dict:
+    """
+    Give each conductor of a cable the colour of the PIN it lands on. WRITES.
+
+    "Asignar conexiones" hands the part's wire templates to the conductors
+    in template order, not by pin (a Festo NEBU-M8G3 crossed as pins 1, 3, 4
+    came out BN, BK, BU instead of BN, BU, BK). The templates carry no pin,
+    so this applies a map {pin designation: colour} to every conductor one
+    of whose ends is that pin, writing CONNECTION_WIRENUMBER on the
+    connection and on the connection definition points along the wire.
+
+    Args:
+        page: Page name.
+        cable: The cable's full name, short tag or handle.
+        pin_colours: "sensor" (M8 / M12 sensor leads: 1 BN, 2 WH, 3 BU,
+            4 BK, 5 GY), "auto" (the same map, applied only when every
+            conductor already carries one of those colours, i.e. the part
+            is a sensor lead) or an explicit {"1": "BN", "4": "BK", ...}.
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "cable", "handle", "conductors": [{"designation",
+         "pins", "pin", "colour", "before", "result": "set"|"already"|
+         "no pin in map", "pointsWritten"}], "skipped"?, "errors"}
+    """
+    try:
+        page = cs_text(page, "page")
+        cable = cs_text(cable, "cable")
+        pmap, auto = _pin_map(pin_colours)
+        if pmap is None:
+            raise SchematicValueError("pin_colours is required.")
+        rows = "".join('            map["%s"] = "%s";\
+' % (cs_escape(cs_text(k, "pin")), cs_escape(cs_text(v, "colour")))
+                       for k, v in pmap.items())
+    except SchematicValueError as exc:
+        return _err(exc)
+    body = (_guard_prelude(allow_real_project)
+            + _PINFIX_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable))
+              .replace("MAPROWS\
+", rows).replace("AUTO", "true" if auto else "false"))
+    return _execute_script(
+        live._script("LiveCablePins_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+
+
+CROSSING_STYLE = {"rotation": 90.0, "height": 1.8, "docked": False, "section": True, "section_height": 1.3}
+
+
+def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
+                                  allow_real_project: bool = False,
                                   timeout_seconds: float = 180.0) -> dict:
     """
     Show the conductor colour and cross-section at every crossing of a
@@ -394,6 +575,11 @@ def live_decorate_cable_crossings(page: str, cable: str, allow_real_project: boo
     Args:
         page: Page name.
         cable: The cable's full name, short tag or handle.
+        style: How the crossing texts look, any of {"rotation": 90 (degrees;
+            0 = horizontal), "height": 1.8 (mm, colour), "docked": False
+            (True = attached to the point by the scheme, no rotation /
+            offset), "section": True (False hides the cross-section),
+            "section_height": 1.3}. Defaults = the Festo macro look.
         allow_real_project: Must be True to write outside the scratch root.
 
     Returns:
@@ -403,10 +589,23 @@ def live_decorate_cable_crossings(page: str, cable: str, allow_real_project: boo
     try:
         page = cs_text(page, "page")
         cable = cs_text(cable, "cable")
-    except SchematicValueError as exc:
-        return _err(exc)
+        st = dict(CROSSING_STYLE)
+        if style is not None:
+            if not isinstance(style, dict):
+                raise SchematicValueError("style must be a dict.")
+            unknown = set(style) - set(CROSSING_STYLE)
+            if unknown:
+                raise SchematicValueError("style: unknown keys %s; valid: %s" % (sorted(unknown), sorted(CROSSING_STYLE)))
+            st.update(style)
+        rot = float(st["rotation"]); height = float(st["height"]); sh = float(st["section_height"])
+    except (SchematicValueError, TypeError, ValueError) as exc:
+        return _err(exc if isinstance(exc, SchematicValueError) else SchematicValueError(str(exc)))
+    rad = ((rot % 360.0) + 360.0) % 360.0 * 3.141592653589793 / 180.0
     body = (_guard_prelude(allow_real_project)
-            + _DECORATE_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable)))
+            + _DECORATE_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable))
+              .replace("STYLE_SECTION_HEIGHT", repr(sh)).replace("STYLE_SECTION", "true" if st["section"] else "false")
+              .replace("STYLE_DOCKED", "true" if st["docked"] else "false")
+              .replace("STYLE_HEIGHT", repr(height)).replace("STYLE_ROT_RAD", repr(rad)))
     return _execute_script(
         live._script("LiveCableDecor_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
@@ -417,6 +616,7 @@ def live_decorate_cable_crossings(page: str, cable: str, allow_real_project: boo
 def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                                   reassign_from_part: bool = False,
                                   crossing_texts: bool = True,
+                                  crossing_style: dict = None, pin_colours="auto",
                                   allow_real_project: bool = False,
                                   timeout_seconds: float = 180.0) -> dict:
     """
@@ -445,6 +645,13 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         crossing_texts: After generating, name the crossing points after
             the cable and show colour / cross-section at each crossing
             (live_decorate_cable_crossings; default True).
+        crossing_style: Look of those texts, see live_decorate_cable_crossings
+            (e.g. {"rotation": 0, "docked": True, "section": False}).
+        pin_colours: After reassign_from_part, pair colours with PINS
+            instead of template order (live_set_conductor_colours):
+            "auto" (default: the M8/M12 sensor-lead map, only when the
+            part gave sensor-lead colours), "sensor", a {pin: colour}
+            dict, or None to leave the template order.
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 180.
 
@@ -514,8 +721,19 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                 conductors = _read()
         res["connectionsGenerated"] = runs
         res["conductors"] = conductors
+        if pin_colours and conductors and reassign_from_part:
+            pr = live_set_conductor_colours(page, res.get("handle") or cable, pin_colours=pin_colours,
+                                            allow_real_project=allow_real_project,
+                                            timeout_seconds=timeout_seconds)
+            p_res = pr.get("results") if isinstance(pr.get("results"), dict) else pr
+            res["pinColours"] = p_res
+            if isinstance(p_res, dict) and not p_res.get("success"):
+                res["pinColoursError"] = p_res.get("error") or p_res.get("errors")
+            elif isinstance(p_res, dict) and not p_res.get("skipped"):
+                conductors = _read()
+                res["conductors"] = conductors
         if crossing_texts and conductors:
-            dr = live_decorate_cable_crossings(page, res.get("handle") or cable,
+            dr = live_decorate_cable_crossings(page, res.get("handle") or cable, style=crossing_style,
                                                allow_real_project=allow_real_project,
                                                timeout_seconds=timeout_seconds)
             d_res = dr.get("results") if isinstance(dr.get("results"), dict) else dr
@@ -531,6 +749,7 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                                 symbol: str = "CABDL", variant: int = 0,
                                 generate: bool = True, scheme: str = None,
                                 show: list = None, crossing_texts: bool = True,
+                                crossing_style: dict = None, pin_colours="auto",
                                 allow_real_project: bool = False,
                                 timeout_seconds: float = 180.0) -> dict:
     """
@@ -567,9 +786,14 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             "0,25 mm²" like a manufacturer macro does, when a scheme has it.
         show: Property texts to make visible on the line, each a property
             id or the displayed text (see live_set_property_texts).
-        crossing_texts: Show colour / cross-section at every crossing and
-            type / conductors / length under the tag, like a manufacturer
-            macro (default True; see live_decorate_cable_crossings).
+        crossing_texts: Show colour / cross-section at every crossing like a
+            manufacturer macro (default True; see
+            live_decorate_cable_crossings); crossing_style sets the look
+            ({"rotation": 0, "docked": True, "section": False} = horizontal
+            colour only).
+        pin_colours: Pair the part's colours with the pins instead of the
+            template order ("auto" default, "sensor", {pin: colour} or
+            None) - see live_assign_cable_connections.
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 180.
 
@@ -642,6 +866,7 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
         a = live_assign_cable_connections(page, res.get("handle"), generate=True,
                                           reassign_from_part=bool(part),
                                           crossing_texts=crossing_texts,
+                                          crossing_style=crossing_style, pin_colours=pin_colours,
                                           allow_real_project=allow_real_project,
                                           timeout_seconds=timeout_seconds)
         a_res = a.get("results") if isinstance(a.get("results"), dict) else a
@@ -653,6 +878,8 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                 res["reassignedFromPart"] = a_res.get("reassignedFromPart")
             if "crossings" in a_res:
                 res["crossings"] = a_res.get("crossings")
+            if "pinColours" in a_res:
+                res["pinColours"] = a_res.get("pinColours")
             if not a_res.get("success"):
                 res["assignError"] = a_res.get("error") or a_res.get("errors")
     if (scheme or show) and isinstance(res, dict) and res.get("success") and res.get("handle"):

@@ -39,12 +39,12 @@ Use one of these whenever you are unsure of an exact action name or parameter �
 
 ## 2. The local `eplan` action server
 
-It exposes **248 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **249 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
   `eplan_disconnect`, `eplan_list_extensions`.
-- **218 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
+- **219 EPLAN action tools** → `eplan_<action>` (e.g. `eplan_open_project`).
   Includes `eplan_live_set_target_project` (pin every later call to one open
   project by its .elk path - reflection scripts then pick it from
   `ProjectManager.OpenProjects` and action wrappers fill an omitted
@@ -302,8 +302,14 @@ All of these exist as `eplan_*` tools:
   `eplan_live_decorate_cable_crossings` (the zero-size "=+" connection
   definition points EPLAN leaves on the line at each crossed wire are
   named after the cable, given the conductor's colour / cross-section and
-  show them rotated 90 deg at the crossing like a manufacturer macro; run by
-  default from the two tools above, `crossing_texts=False` skips it) and
+  show them rotated 90 deg at the crossing like a manufacturer macro - or
+  horizontal, docked, colour only, with `style` / `crossing_style`; run by
+  default from the two tools above, `crossing_texts=False` skips it),
+  `eplan_live_set_conductor_colours` (colour per PIN, not per template
+  order: "Asignar conexiones" hands a sensor lead's BN/BK/BU out in
+  template order, so pin 3 got BK; the M8/M12 sensor map 1 BN, 2 WH, 3 BU,
+  4 BK, 5 GY or an explicit {pin: colour}; `pin_colours="auto"` on the two
+  tools above applies it when the part gave sensor-lead colours) and
   `eplan_live_assign_cable_connections` (re-run the geometric assignment
   for a line placed by hand or moved: EPLAN does not assign conductors to
   an API-placed line on its own; a connection EPLAN linked to the line

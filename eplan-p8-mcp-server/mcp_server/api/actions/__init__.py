@@ -382,6 +382,7 @@ from .cables_live import (
     live_place_cable_definition,
     live_assign_cable_connections,
     live_decorate_cable_crossings,
+    live_set_conductor_colours,
 )
 
 from .project_live import (
@@ -564,7 +565,7 @@ __all__ = [
     'live_panel_captions', 'live_set_panel_captions',
     'live_property_texts', 'live_set_property_texts',
     'live_terminal_strips', 'live_set_terminal_strip_definition',
-    'live_cables', 'live_place_cable_definition', 'live_assign_cable_connections', 'live_decorate_cable_crossings',
+    'live_cables', 'live_place_cable_definition', 'live_assign_cable_connections', 'live_decorate_cable_crossings', 'live_set_conductor_colours',
     'live_project_templates', 'live_create_project',
     'live_query_functions', 'live_query_pages', 'live_plc_io_list', 'live_set_function_text',
     'live_set_connection_designations', 'live_read_check_messages',
