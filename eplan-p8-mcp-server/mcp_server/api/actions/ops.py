@@ -1345,7 +1345,7 @@ def _wait_for(path, timeout):
     while not os.path.exists(path):
         if time.time() - start > timeout:
             return False
-        time.sleep(0.05)
+        time.sleep(0.02)
     return True
 
 
@@ -1403,7 +1403,7 @@ def _run_registered(manager, request_path, result_path, timeout):
 
 
 def run_ops(page, ops, read_back=False, stop_on_error=True, allow_real_project=False,
-            write=True, pins=True, limit=1000, types=None, timeout_seconds=300.0):
+            write=True, pins=True, limit=1000, types=None, timeout_seconds=300.0, brief=True):
     """Execute a list of ops on one page in ONE EPLAN script. Returns the shaped result.
 
     The read-back is limited to device types by default: a real page is mostly
@@ -1470,7 +1470,30 @@ def run_ops(page, ops, read_back=False, stop_on_error=True, allow_real_project=F
         if out.get("page_after"):
             schematic._annotate_pins(out)
             out["overlaps"] = _overlaps(out["page_after"].get("placements") or [])
+    if brief:
+        _compact_ops(out)
     return out
+
+
+# Ops whose "placed" echo is only a confirmation: the caller already holds
+# the handle, so the symbol, bounding box and absent-member list it carries
+# are weight, not news (an update op echoed 300 chars of placed per CDP on
+# P26009's pages; 48 of them per batch). Place-like ops keep the full echo:
+# the pins and box of a new object are what the next op is laid out from.
+_ECHO_ONLY_OPS = ("update", "move", "resize", "remove", "text", "line", "rect", "dimension", "image")
+_ECHO_KEYS = ("clrType", "handle", "name", "visibleName", "location", "wireNumber", "crossSection", "text")
+
+
+def _compact_ops(out):
+    for op in out.get("ops") or []:
+        if not isinstance(op, dict) or op.get("op") not in _ECHO_ONLY_OPS:
+            continue
+        placed = op.get("placed")
+        if isinstance(placed, dict):
+            op["placed"] = {k: placed[k] for k in _ECHO_KEYS if k in placed}
+        for k in ("page_before", "page_after"):
+            if isinstance(op.get(k), dict) and "placements" in op[k]:
+                op[k] = {"placementCount": op[k].get("placementCount", len(op[k].get("placements") or []))}
 
 
 # ---------------------------------------------------------------------------
@@ -1706,7 +1729,8 @@ def _err(exc):
 
 
 def live_batch(page: str, operations: list, read_back: bool = False,
-               stop_on_error: bool = True, allow_real_project: bool = False,
+               stop_on_error: bool = True, brief: bool = True,
+               allow_real_project: bool = False,
                timeout_seconds: float = 300.0) -> dict:
     """
     Run a list of page operations in ONE EPLAN script. WRITES - scratch-only by default.
@@ -1769,6 +1793,12 @@ def live_batch(page: str, operations: list, read_back: bool = False,
             "overlaps": pairs of device outlines that intersect without one
             containing the other.
         stop_on_error: Default True.
+        brief: Default True: an edit op (update, move, resize, remove, text,
+            line, rect, dimension, image) echoes only handle, name, type,
+            location and the values it wrote - not the symbol, bounding box
+            and absent-member list of the object the caller already holds.
+            Place-like ops keep the full echo with pins. False keeps every
+            echo whole.
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: For the whole batch. Default 300.
 
@@ -1788,7 +1818,7 @@ def live_batch(page: str, operations: list, read_back: bool = False,
         if not isinstance(op.get("op"), str):
             return {"success": False, "error": "operation %d has no 'op' name." % i}
     return run_ops(page, operations, read_back=read_back, stop_on_error=stop_on_error,
-                   allow_real_project=allow_real_project, timeout_seconds=timeout_seconds)
+                   allow_real_project=allow_real_project, timeout_seconds=timeout_seconds, brief=brief)
 
 
 def live_find_placements(page: str, name: str = None, contains: str = None,

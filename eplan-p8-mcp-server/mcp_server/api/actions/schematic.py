@@ -1443,7 +1443,7 @@ def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
 
 def live_remove_placement(page: str, handle: str = None,
                           expect_type: str = None, remove_page: bool = False,
-                          brief: bool = False,
+                          brief: bool = True,
                           allow_real_project: bool = False,
                           timeout_seconds: float = 90.0) -> dict:
     """
@@ -1467,10 +1467,11 @@ def live_remove_placement(page: str, handle: str = None,
             instead of deleting the wrong object.
         remove_page: Remove the whole page and everything on it. Requires
             handle to be omitted, so it cannot happen by accident.
-        brief: Replace the page dumps (page_before / page_after, tens of
-            thousands of characters on a dense page) by their placement
-            counts: {"placementCount": n}. The removed object is still
-            reported in full.
+        brief: Default True: the page dumps (page_before / page_after, tens
+            of thousands of characters on a dense page) are replaced by
+            their placement counts: {"placementCount": n}. The removed
+            object is still reported in full. False returns the dumps
+            (the record of what a remove_page destroyed).
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 90s.
 
