@@ -727,12 +727,36 @@ def test_assign_cable_connections_reassign_runs_after_conductors_exist(monkeypat
     monkeypatch.setattr(cables_live, "live_cables",
                         lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "201"}]}]}})
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
-    assert len(scripts) == 1 and "if (false)" in scripts[0]
+    # the script carries the whole chain: updates + conductor read, reassign only with a part
+    assert len(scripts) == 1 and "if (false && conductors.Count > 0)" in scripts[0]
+    assert "RunAction(genCmd)" in scripts[0] and '/PAGENAME:\\"+CE/2\\"' in scripts[0] and "CableConductors(cable)" in scripts[0]
+    # the fake script did not report inlineGenerate, so the wrapper fell back to its own loop + reassign script
     scripts.clear()
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True, crossing_texts=False, pin_colours=None)
-    assert len(scripts) == 2 and "if (false)" in scripts[0] and "if (true)" in scripts[1]
-    assert "DoReassignWires" in scripts[1] and _string_literals_balanced(scripts[1])
+    assert len(scripts) == 2 and "if (true && conductors.Count > 0)" in scripts[0] and "if (true)" in scripts[1]
+    assert "DoReassignWires" in scripts[0] and "DoReassignWires" in scripts[1] and _string_literals_balanced(scripts[0])
     assert r["results"]["reassignedFromPart"] is True and r["results"]["connectionsGenerated"] == 2
+
+
+def test_assign_cable_connections_inline_chain_skips_python_loop(monkeypatch):
+    """When the script did the updates itself, no generate / read / reassign round-trips follow."""
+    from api.actions import cables_live, generate
+    scripts, gens, reads = [], [], []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "crossed": [{"designation": "201", "assigned": "now"}],
+                            "inlineGenerate": True, "connectionsGenerated": 3, "reassignedFromPart": True, "lockedPoints": 3,
+                            "conductors": [{"designation": "201", "colour": "BN"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(1) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables", lambda **kw: reads.append(1) or {"results": {"cables": []}})
+    pins = []
+    monkeypatch.setattr(cables_live, "live_set_conductor_colours",
+                        lambda page, cable, **kw: pins.append(kw) or {"results": {"success": True, "skipped": "x"}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", reassign_from_part=True, crossing_texts=False, pin_colours="sensor", timeout_seconds=180)
+    assert len(scripts) == 1 and gens == [] and reads == []
+    res = r["results"]
+    assert res["connectionsGenerated"] == 3 and res["conductors"][0]["colour"] == "BN" and res["lockedPoints"] == 3
+    assert pins and pins[0]["timeout_seconds"] == 60.0, "the pin-colour step keeps a short leash"
 
 
 def test_place_cable_definition_applies_scheme_after_assign(monkeypatch):
@@ -930,11 +954,11 @@ def test_panel_captions_report_rotation_height_and_suffix_match(monkeypatch):
 def test_remove_placement_brief_mode(monkeypatch):
     from api.actions import schematic
     captured = _capture(monkeypatch, schematic)
-    schematic.live_remove_placement("+CE/2", handle="1/2/3/0", brief=True)
+    schematic.live_remove_placement("+CE/2", handle="1/2/3/0")
     cs = captured["script"]
-    assert "true ? PageSummary(page) : ReadPage(page, 200, false, null)" in cs
+    assert "true ? PageSummary(page) : ReadPage(page, 200, false, null)" in cs, "brief is the default"
     captured.clear()
-    schematic.live_remove_placement("+CE/2", remove_page=True)
+    schematic.live_remove_placement("+CE/2", remove_page=True, brief=False)
     cs = captured["script"]
     assert "false ? PageSummary(page) : ReadPage(page, 500, false, null)" in cs
 
@@ -1036,3 +1060,77 @@ def test_assign_updates_once_when_the_line_crosses_nothing_yet(monkeypatch):
     runs.clear(); gens.clear()
     cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False)
     assert len(runs) == 1 and gens == []
+
+
+def test_set_property_texts_batch_items_one_script(monkeypatch):
+    """Many placements in ONE script; each item scoped, failures per item;
+    the compact result keeps only the touched captions."""
+    from api.actions import captions_live
+    scripts = []
+    monkeypatch.setattr(captions_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+                            "project": "P", "count": 2, "failed": 1, "success": False,
+                            "items": [{"ref": "-X01", "success": True, "handle": "h1"},
+                                      {"ref": "-B3", "success": False, "error": "No placement matches ref -B3 on the page."}]}})
+    r = captions_live.live_set_property_texts("+CAMPO/1", items=[
+        {"ref": "-X01", "positions": {"20010": [60, 212]}, "hide": ["22002"]},
+        {"ref": "-B3", "rotations": {"20011": 90}, "scheme": "Arriba a la izquierda, fuera 90"},
+    ])
+    assert len(scripts) == 1
+    cs = scripts[0]
+    assert _string_literals_balanced(cs)
+    assert cs.count('ir["ref"] = ') == 2 and cs.count("catch (Exception ex) { ir[\"success\"] = false;") == 2
+    assert 'FindPanelItems(page, "-X01")' in cs and 'FindPanelItems(page, "-B3")' in cs
+    assert 'new string[] { "20010", "60.0", "212.0" }' in cs and 'new string[] { "20011", "90.0" }' in cs
+    # the scheme and the local switch keep their order inside each item
+    assert cs.index('SelectScheme(pl, "Arriba') < cs.rindex('"UseLocalPropertyPlacements"')
+    # compact by default: no before list, after = touched captions only
+    assert 'if (!true) ir["before"]' in cs and 'TouchedCaptions(pl, new string[] { "22002", "20010" })' in cs
+    assert "static List<Dictionary<string, object>> TouchedCaptions(" in cs
+    assert r["results"]["failed"] == 1 and r["results"]["items"][1]["success"] is False
+    # brief=False keeps the full before / after lists
+    scripts.clear()
+    captions_live.live_set_property_texts("+CAMPO/1", items=[{"ref": "-X01", "hide": ["22002"]}], brief=False)
+    assert 'if (!false) ir["before"]' in scripts[0] and "false ? TouchedCaptions" in scripts[0]
+    # shapes
+    assert captions_live.live_set_property_texts("p", items=[])["success"] is False
+    assert captions_live.live_set_property_texts("p", items=[{"positions": {}}])["success"] is False
+    assert captions_live.live_set_property_texts("p", "-X1", items=[{"ref": "-X2"}])["success"] is False
+    assert captions_live.live_set_property_texts("p", items=[{"ref": "-X2", "bogus": 1}])["success"] is False
+    assert captions_live.live_set_property_texts("p")["success"] is False
+
+
+def test_set_property_texts_single_ref_keeps_flat_shape(monkeypatch):
+    from api.actions import captions_live
+    monkeypatch.setattr(captions_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {
+                            "project": "P", "count": 1, "failed": 0, "success": True,
+                            "items": [{"ref": "-X01", "success": True, "handle": "h1", "name": "=+CE-X01", "after": [], "moves": []}]}})
+    r = captions_live.live_set_property_texts("+CE/2", "-X01", hide=["22002"])
+    assert r["success"] is True and r["results"]["handle"] == "h1" and "items" not in r["results"] and "ref" not in r["results"]
+    monkeypatch.setattr(captions_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {
+                            "project": "P", "count": 1, "failed": 1, "success": False,
+                            "items": [{"ref": "-X01", "success": False, "error": "No placement matches ref -X01 on the page."}]}})
+    r = captions_live.live_set_property_texts("+CE/2", "-X01", hide=["22002"])
+    assert r["success"] is False and "No placement" in r["error"]
+
+
+def test_batch_compacts_edit_op_echoes():
+    from api.actions import ops
+    full = {"clrType": "ConnectionDefinitionPoint", "handle": "h", "name": "=+CE-W1", "location": {"x": 1, "y": 2},
+            "wireNumber": "BN", "boundingBox": [{"x": 0, "y": 0}, {"x": 2, "y": 2}], "symbol": {"library": "SPECIAL"},
+            "absentMembers": ["Name"], "pins": [1]}
+    out = {"ops": [{"op": "update", "placed": dict(full)}, {"op": "place", "placed": dict(full)},
+                   {"op": "remove", "placed": dict(full), "page_after": {"placementCount": 5, "placements": [1, 2, 3, 4, 5]}}]}
+    ops._compact_ops(out)
+    assert out["ops"][0]["placed"] == {"clrType": "ConnectionDefinitionPoint", "handle": "h", "name": "=+CE-W1", "location": {"x": 1, "y": 2}, "wireNumber": "BN"}
+    assert out["ops"][1]["placed"] == full, "a place op keeps its pins and box"
+    assert out["ops"][2]["page_after"] == {"placementCount": 5}
+
+
+def test_tool_wrapper_returns_compact_json():
+    import json, server
+    wrapped = server._json_wrapper(lambda: {"a": [1, 2], "b": {"x": 1.5}})
+    assert wrapped() == '{"a":[1,2],"b":{"x":1.5}}'
+    assert json.loads(wrapped()) == {"a": [1, 2], "b": {"x": 1.5}}

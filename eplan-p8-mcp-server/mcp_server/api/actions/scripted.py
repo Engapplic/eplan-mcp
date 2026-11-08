@@ -452,7 +452,7 @@ def _execute_script(script_content: str, timeout: float = 30.0) -> dict:
                 if preserved:
                     result["failedScriptPath"] = preserved
                 return result
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         # Read results, tolerating a partially-written file (the C# writer
         # is not atomic vs our existence probe).

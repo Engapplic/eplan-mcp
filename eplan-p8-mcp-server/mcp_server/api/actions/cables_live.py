@@ -124,6 +124,48 @@ def live_cables(contains: str = None, timeout_seconds: float = 120.0) -> dict:
 
 
 _HELPERS_CABLE = r'''
+    // Run an EPLAN action from inside the script (CommandLineInterpreter),
+    // so a connection update does not cost a round-trip of its own: the
+    // cable chain went from ~14 scripts to ~5 (2026-11-08).
+    static void RunAction(string cmd)
+    {
+        Type t = FindType("Eplan.EplApi.ApplicationFramework.CommandLineInterpreter");
+        if (t == null) throw new Exception("CommandLineInterpreter is not loaded in this script host.");
+        object cli = Activator.CreateInstance(t);
+        MethodInfo m = null;
+        foreach (MethodInfo mi in t.GetMethods())
+            if (mi.Name == "Execute" && mi.GetParameters().Length == 1 && mi.GetParameters()[0].ParameterType == typeof(string)) { m = mi; break; }
+        if (m == null) throw new Exception("CommandLineInterpreter.Execute(string) not found.");
+        try { m.Invoke(cli, new object[] { cmd }); }
+        catch (TargetInvocationException tie) { throw new Exception("Action failed: " + cmd + " <- " + Flatten(tie.InnerException ?? tie)); }
+    }
+
+    static List<Dictionary<string, object>> CableConductors(object fn)
+    {
+        List<Dictionary<string, object>> conductors = new List<Dictionary<string, object>>();
+        object conns = TryRead(fn, "CableConnections", null);
+        if (conns != null) foreach (object c in (IEnumerable)conns)
+        {
+            if (c == null) continue;
+            Dictionary<string, object> cd = new Dictionary<string, object>();
+            cd["name"] = PropText(c, "Name") ?? "";
+            object cp = TryRead(c, "Properties", null);
+            if (cp != null)
+            {
+                cd["designation"] = PropText(cp, "CONNECTION_DESIGNATION") ?? "";
+                cd["colour"] = PropText(cp, "CONNECTION_WIRENUMBER") ?? "";
+                cd["crossSection"] = PropText(cp, "CONNECTION_WIRECROSSSECTION_WITH_UNIT") ?? "";
+            }
+            object s1 = TryRead(c, "StartSymbolReference", null), s2 = TryRead(c, "EndSymbolReference", null);
+            cd["source"] = s1 == null ? "" : (PropText(s1, "Name") ?? "");
+            cd["target"] = s2 == null ? "" : (PropText(s2, "Name") ?? "");
+            object cpg = TryRead(c, "Page", null);
+            cd["page"] = cpg == null ? null : PropText(cpg, "Name");
+            conductors.Add(cd);
+        }
+        return conductors;
+    }
+
     static void LockAny(object o)
     {
         if (o == null) return;
@@ -353,9 +395,7 @@ _ASSIGN_BODY = '''
 '''
 
 
-_REASSIGN_TAIL = '''
-            if (REASSIGN)
-            {
+_REASSIGN_INNER = '''
                 // "Asignar conexiones": the part's wire templates hand their
                 // colour / cross-section to the conductors (EPL.DEFAULT-CABLE
                 // turned BU/BU/BU into BK/BN/GY). Verified 2026-11-03.
@@ -399,8 +439,47 @@ _REASSIGN_TAIL = '''
                 results["lockedConductors"] = lockedConductors;
                 try { m.Invoke(csvc, new object[] { cable, true, excl }); results["reassignedFromPart"] = true; }
                 catch (Exception e) { results["reassignedFromPart"] = false; errors.Add("DoReassignWires: " + Flatten(e)); results["success"] = false; }
+'''
+
+
+_REASSIGN_TAIL = '''
+            if (REASSIGN)
+            {
+''' + _REASSIGN_INNER + '''            }
+'''
+
+
+# One script for the whole chain after the assignment: connection update(s)
+# and the conductor read, then - with a part - the reassign and one more
+# update. The caller used to run each as its own round-trip (3 updates, 3
+# reads, 1 reassign, 1 update, 1 read: ~9 scripts at 0.4-0.7 s each).
+# Measured on 2026.0.3: the first update after the assignment does not yet
+# list the conductors, the second does - hence the loop of up to three.
+_INLINE_TAIL = '''
+            if (GENERATE && errors.Count == 0)
+            {
+                int wanted = 0;
+                foreach (Dictionary<string, object> d in assigned) { string a0 = Convert.ToString(d["assigned"]); if (a0 == "now" || a0 == "already") wanted++; }
+                string projPath = PropText(project, "ProjectFullName") ?? "";
+                string genCmd = "generate /TYPE:CONNECTIONS /PROJECTNAME:\\"" + projPath + "\\" /PAGENAME:\\"PAGEVALUE\\"";
+                int runs = 0;
+                List<Dictionary<string, object>> conductors = CableConductors(cable);
+                try
+                {
+                    while (runs < 3) { RunAction(genCmd); runs++; conductors = CableConductors(cable); if (conductors.Count >= wanted) break; }
+                    results["inlineGenerate"] = true;
+                    if (REASSIGN && conductors.Count > 0)
+                    {
+''' + _REASSIGN_INNER + '''
+                        RunAction(genCmd); runs++; conductors = CableConductors(cable);
+                    }
+                    results["connectionsGenerated"] = runs;
+                    results["conductors"] = conductors;
+                }
+                catch (Exception ge) { results["inlineGenerateError"] = Flatten(ge); results.Remove("inlineGenerate"); }
             }
 '''
+
 
 
 _DECORATE_BODY = """
@@ -690,7 +769,7 @@ def _pin_map(pin_colours):
 
 def live_set_conductor_colours(page: str, cable: str, pin_colours="sensor",
                                allow_real_project: bool = False,
-                               timeout_seconds: float = 180.0) -> dict:
+                               timeout_seconds: float = 60.0) -> dict:
     """
     Give each conductor of a cable the colour of the PIN it lands on. WRITES.
 
@@ -868,17 +947,18 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         cable = cs_text(cable, "cable")
     except SchematicValueError as exc:
         return _err(exc)
-    def _run(reassign):
+    def _run(reassign, inline=False):
+        tail = (_INLINE_TAIL.replace("GENERATE", "true") if inline else _REASSIGN_TAIL)
         body = (_guard_prelude(allow_real_project)
                 + _ASSIGN_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable))
-                + _REASSIGN_TAIL.replace("REASSIGN", "true" if reassign else "false"))
+                + tail.replace("REASSIGN", "true" if reassign else "false").replace("PAGEVALUE", cs_escape(page)))
         return _execute_script(
             live._script("LiveCableAssign_" + uuid.uuid4().hex[:6], body,
                          extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
             timeout=timeout_seconds,
         )
 
-    r = _run(False)
+    r = _run(reassign_from_part, inline=generate)
     res = r.get("results") if isinstance(r.get("results"), dict) else r
     if generate and isinstance(res, dict) and res.get("success") and not res.get("crossed"):
         # Wires drawn in this session have no Connection objects until the
@@ -887,7 +967,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         from .generate import generate_connections as _gen0
         from . import target as _t0
         _gen0(project_name=_t0.get() or None, page_name=page)
-        r = _run(False)
+        r = _run(reassign_from_part, inline=True)
         res = r.get("results") if isinstance(r.get("results"), dict) else r
         if isinstance(res, dict):
             res["generatedFirst"] = True
@@ -911,7 +991,12 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         # update, read, and update once more while the count is short.
         runs = 0
         conductors = []
-        while runs < 3:
+        inline = bool(res.get("inlineGenerate"))
+        if inline:
+            # the script already updated, read and (with a part) reassigned
+            runs = int(res.get("connectionsGenerated") or 0)
+            conductors = res.get("conductors") or []
+        while not inline and runs < 3:
             g = generate_connections(project_name=_target.get() or None, page_name=page)
             runs += 1
             if not g.get("success"):
@@ -962,7 +1047,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                 else:
                     res["orphanPoints"] = pts
                     res["orphanError"] = orp.get("error") or orp.get("errors")
-        if reassign_from_part and conductors:
+        if reassign_from_part and conductors and not inline:
             # The templates can only be handed to conductors that exist, so
             # this runs after the connection update, then one more update.
             r2 = _run(True)
@@ -983,7 +1068,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         if pin_colours and conductors and reassign_from_part:
             pr = live_set_conductor_colours(page, res.get("handle") or cable, pin_colours=pin_colours,
                                             allow_real_project=allow_real_project,
-                                            timeout_seconds=timeout_seconds)
+                                            timeout_seconds=min(timeout_seconds, 60.0))
             p_res = pr.get("results") if isinstance(pr.get("results"), dict) else pr
             res["pinColours"] = p_res
             if isinstance(p_res, dict) and not p_res.get("success"):
@@ -1156,7 +1241,8 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             res["crossed"] = a_res.get("crossed")
             res["conductors"] = a_res.get("conductors") or []
             res["connectionsGenerated"] = a_res.get("connectionsGenerated")
-            for k in ("reassignedFromPart", "lockedPoints", "lockedConductors", "replacedLine", "previousHandle"):
+            for k in ("reassignedFromPart", "lockedPoints", "lockedConductors", "replacedLine", "previousHandle",
+                      "inlineGenerate", "inlineGenerateError", "generatedFirst"):
                 if k in a_res:
                     res[k] = a_res.get(k)
             if a_res.get("orphanPoints"):

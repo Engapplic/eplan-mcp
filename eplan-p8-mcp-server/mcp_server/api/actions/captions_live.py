@@ -39,6 +39,16 @@ from .schematic_model import cs_bool, cs_text, SchematicValueError
 
 
 _HELPERS_CAPTIONS = r'''
+    // The captions a call touched (by property id or displayed text), for
+    // a compact result instead of every text of the placement.
+    static List<Dictionary<string, object>> TouchedCaptions(object pl, string[] sels)
+    {
+        List<Dictionary<string, object>> outp = new List<Dictionary<string, object>>();
+        foreach (Dictionary<string, object> c in CaptionBoxes(pl))
+            foreach (string s in sels) if (CaptionMatches(c, s)) { outp.Add(c); break; }
+        return outp;
+    }
+
     static void LockQuiet(object o)
     {
         if (o == null) return;
@@ -168,128 +178,98 @@ def live_property_texts(page: str, ref: str = None, only_visible: bool = False,
     )
 
 
-def live_set_property_texts(page: str, ref: str, scheme: str = None, hide: list = None,
-                            show: list = None, positions: dict = None, rotations: dict = None,
-                            heights: dict = None, justifications: dict = None,
-                            allow_real_project: bool = False,
-                            timeout_seconds: float = 300.0) -> dict:
-    """
-    Arrange the property texts of ONE placement: pick a scheme, hide / show,
-    move, rotate, resize, justify. WRITES - scratch-only by default.
+def _arr(values):
+    return "new string[] { " + ", ".join('"%s"' % i for i in values) + " }"
 
-    Order of work: scheme (puts the placement on that shared arrangement),
-    then the switch to a LOCAL arrangement (UseLocalPropertyPlacements, so
-    the per-text edits touch only this placement and survive closing the
-    project), then show, hide, heights, justifications, rotations, and the
-    moves last (a move is measured on the box, which the other edits change).
-    A move is given as the wanted TOP-LEFT of the text box in page mm and
-    reached by measure-and-correct (undock, move, re-measure; a few rounds).
 
-    Typical dense-I/O use: {"positions": {"20010": [x, y_above_box]},
-    "rotations": {"20011": 90}, "hide": ["22002"]} on each black box, and
-    {"hide": ["20011"]} on the cable and the Y.
+def _table2(rows):
+    return ", ".join('new string[] { "%s", "%r" }' % (s_, v) for s_, v in rows)
 
-    Args:
-        page: Page name.
-        ref: The placement's handle, its full tag, or the bare "-X01"
-            (suffix match). Must resolve to exactly one placement; several
-            -> error listing the handles (use eplan_live_property_texts).
-        scheme: Name of a property arrangement scheme (exact, or a unique
-            case-insensitive prefix: "Arriba a la izquierda, fuera 90").
-            eplan_live_property_texts(with_schemes=True) lists them.
-        hide, show: Texts to hide / show, each a property id (20011,
-            "20011") or the exact displayed text ("-X01").
-        positions: {selector: [x, y]} - wanted top-left of the text box.
-        rotations: {selector: degrees} - 0 horizontal, 90 reads upwards.
-        heights: {selector: mm} - text height.
-        justifications: {selector: name} - a JustificationType name
-            ("TopLeft", "MiddleCenter", "BottomLeft", ...; the error lists
-            them).
-        allow_real_project: Must be True to write outside the scratch root.
-        timeout_seconds: Default 300.
 
-    Returns:
-        {"success", "handle", "name", "useLocal", "scheme", "before": [captions],
-        "after": [captions], "moves": [{"selector", "target", "reached",
-        "rounds", "final"}], "log": [...]}
-    """
-    try:
-        page_cs = cs_escape(cs_text(page, "page"))
-        ref_cs = cs_escape(cs_text(ref, "ref"))
-        scheme_cs = cs_escape(cs_text(scheme, "scheme")) if scheme else ""
-        hide_cs = [cs_escape(cs_text(str(h), "hide[]")) for h in (hide or [])]
-        show_cs = [cs_escape(cs_text(str(h), "show[]")) for h in (show or [])]
-        pos_rows = []
+class _TextItem:
+    """One placement's text edits, validated and escaped for the C# tables."""
+
+    def __init__(self, ref, scheme=None, hide=None, show=None, positions=None, rotations=None,
+                 heights=None, justifications=None, **extra):
+        if extra:
+            raise SchematicValueError("Unknown item keys: %s (allowed: ref, scheme, hide, show, "
+                                      "positions, rotations, heights, justifications)." % ", ".join(sorted(extra)))
+        self.ref_cs = cs_escape(cs_text(ref, "ref"))
+        self.scheme_cs = cs_escape(cs_text(scheme, "scheme")) if scheme else ""
+        self.hide_cs = [cs_escape(cs_text(str(h), "hide[]")) for h in (hide or [])]
+        self.show_cs = [cs_escape(cs_text(str(h), "show[]")) for h in (show or [])]
+        self.pos_rows = []
         if positions is not None and not isinstance(positions, dict):
             raise SchematicValueError("positions must be {selector: [x, y]}.")
         for sel, xy in (positions or {}).items():
             if not isinstance(xy, (list, tuple)) or len(xy) != 2:
                 raise SchematicValueError("positions[%r] must be [x, y]." % (sel,))
-            pos_rows.append((cs_escape(cs_text(str(sel), "positions key")), float(xy[0]), float(xy[1])))
+            self.pos_rows.append((cs_escape(cs_text(str(sel), "positions key")), float(xy[0]), float(xy[1])))
 
         def num_rows(d, what):
             if d is not None and not isinstance(d, dict):
                 raise SchematicValueError("%s must be {selector: number}." % what)
             return [(cs_escape(cs_text(str(k), what + " key")), float(v)) for k, v in (d or {}).items()]
-        rot_rows = num_rows(rotations, "rotations")
-        h_rows = num_rows(heights, "heights")
+        self.rot_rows = num_rows(rotations, "rotations")
+        self.h_rows = num_rows(heights, "heights")
         if justifications is not None and not isinstance(justifications, dict):
             raise SchematicValueError("justifications must be {selector: name}.")
-        j_rows = [(cs_escape(cs_text(str(k), "justifications key")), cs_escape(cs_text(str(v), "justifications value")))
-                  for k, v in (justifications or {}).items()]
-    except (SchematicValueError, TypeError, ValueError) as exc:
-        return _err(exc if isinstance(exc, SchematicValueError) else SchematicValueError(str(exc)))
+        self.j_rows = [(cs_escape(cs_text(str(k), "justifications key")), cs_escape(cs_text(str(v), "justifications value")))
+                       for k, v in (justifications or {}).items()]
+        self.pos_table = ", ".join('new string[] { "%s", "%r", "%r" }' % (s_, x, y) for s_, x, y in self.pos_rows)
+        self.j_table = ", ".join('new string[] { "%s", "%s" }' % (s_, v) for s_, v in self.j_rows)
+        self.any_edit = bool(self.hide_cs or self.show_cs or self.pos_rows or self.rot_rows or self.h_rows or self.j_rows)
+        touched = list(self.hide_cs) + list(self.show_cs) + [r[0] for r in self.pos_rows + self.rot_rows + self.h_rows + self.j_rows]
+        seen = set()
+        self.touched = [t for t in touched if not (t in seen or seen.add(t))]
 
-    def arr(items):
-        return "new string[] { " + ", ".join('"%s"' % i for i in items) + " }"
 
-    def table2(rows):
-        return ", ".join('new string[] { "%s", "%r" }' % (s, v) for s, v in rows)
-    pos_table = ", ".join('new string[] { "%s", "%r", "%r" }' % (s, x, y) for s, x, y in pos_rows)
-    j_table = ", ".join('new string[] { "%s", "%s" }' % (s, v) for s, v in j_rows)
-    any_edit = bool(hide_cs or show_cs or pos_rows or rot_rows or h_rows or j_rows)
-
-    body = _guard_prelude(allow_real_project) + '''
-            object page = FindPage(project, "''' + page_cs + '''");
-            LockQuiet(page);
-            List<object> hits = FindPanelItems(page, "''' + ref_cs + '''");
-            if (hits.Count == 0) throw new Exception("No placement matches ref ''' + ref_cs + ''' on the page.");
+def _text_item_block(it):
+    """C# for one item: resolves the placement, applies the edits, records ir."""
+    return '''
+            {
+            Dictionary<string, object> ir = new Dictionary<string, object>();
+            ir["ref"] = "''' + it.ref_cs + '''";
+            try
+            {
+            List<object> hits = FindPanelItems(page, "''' + it.ref_cs + '''");
+            if (hits.Count == 0) throw new Exception("No placement matches ref ''' + it.ref_cs + ''' on the page.");
             if (hits.Count > 1)
             {
                 List<string> hs = new List<string>(); foreach (object h in hits) hs.Add(Handle(h) + " " + (PropText(h, "Name") ?? ""));
-                throw new Exception("ref ''' + ref_cs + ''' matches " + hits.Count + " placements; use a handle: " + string.Join(", ", hs.ToArray()));
+                throw new Exception("ref ''' + it.ref_cs + ''' matches " + hits.Count + " placements; use a handle: " + string.Join(", ", hs.ToArray()));
             }
             object pl = hits[0];
             if (GetReadable(pl.GetType(), "PropertyPlacements") == null) throw new Exception("A " + pl.GetType().Name + " has no property texts.");
             List<string> log = new List<string>();
             LockQuiet(pl);
-            results["handle"] = Handle(pl); results["name"] = PropText(pl, "Name") ?? "";
-            results["before"] = CaptionBoxes(pl);
+            ir["handle"] = Handle(pl); ir["name"] = PropText(pl, "Name") ?? "";
+            if (!BRIEF) ir["before"] = CaptionBoxes(pl);
 
             // 1. arrangement scheme (shared) - before the local switch, which it resets
-            if ("''' + scheme_cs + '''" != "") { string chosen = SelectScheme(pl, "''' + scheme_cs + '''"); log.Add("scheme -> " + chosen); }
-            results["scheme"] = SelectedScheme(pl);
+            if ("''' + it.scheme_cs + '''" != "") { string chosen = SelectScheme(pl, "''' + it.scheme_cs + '''"); log.Add("scheme -> " + chosen); }
+            ir["scheme"] = SelectedScheme(pl);
 
             // 2. local arrangement, always, before any per-text edit
             PropertyInfo ul = GetWritable(pl.GetType(), "UseLocalPropertyPlacements");
             if (ul == null) throw new Exception("Placement has no UseLocalPropertyPlacements; texts cannot be edited safely. " + MemberList(pl.GetType(), false));
-            bool anyEdit = ''' + cs_bool(any_edit) + ''';
+            bool anyEdit = ''' + cs_bool(it.any_edit) + ''';
             if (anyEdit && !(bool)ul.GetValue(pl, null))
             {
                 try { ul.SetValue(pl, true, null); }
                 catch (Exception e1) { MethodInfo sw = MethodByShape(pl.GetType(), "SwitchLocalPropertyPlacements", new string[] { }, false); if (sw == null) throw new Exception("UseLocalPropertyPlacements=true failed: " + Flatten(e1)); sw.Invoke(pl, null); }
                 log.Add("UseLocalPropertyPlacements -> " + ul.GetValue(pl, null));
             }
-            results["useLocal"] = (bool)ul.GetValue(pl, null);
+            ir["useLocal"] = (bool)ul.GetValue(pl, null);
 
             // 3. show / hide
-            foreach (string sel in ''' + arr(show_cs) + ''')
+            foreach (string sel in ''' + _arr(it.show_cs) + ''')
             { object pp = FindCaption(pl, sel); if (pp == null) { log.Add("show: no text '" + sel + "'"); continue; } LockQuiet(pp); GetWritable(pp.GetType(), "IsVisible").SetValue(pp, true, null); log.Add("shown '" + sel + "'"); }
-            foreach (string sel in ''' + arr(hide_cs) + ''')
+            foreach (string sel in ''' + _arr(it.hide_cs) + ''')
             { object pp = FindCaption(pl, sel); if (pp == null) { log.Add("hide: no text '" + sel + "'"); continue; } LockQuiet(pp); GetWritable(pp.GetType(), "IsVisible").SetValue(pp, false, null); log.Add("hidden '" + sel + "'"); }
 
             // 4. heights (mm)
-            foreach (string[] w in new string[][] { ''' + table2(h_rows) + ''' })
+            foreach (string[] w in new string[][] { ''' + _table2(it.h_rows) + ''' })
             {
                 object pp = FindCaption(pl, w[0]); if (pp == null) { log.Add("height: no text '" + w[0] + "'"); continue; }
                 LockQuiet(pp);
@@ -299,7 +279,7 @@ def live_set_property_texts(page: str, ref: str, scheme: str = None, hide: list 
             }
 
             // 5. justifications (JustificationType names)
-            foreach (string[] w in new string[][] { ''' + j_table + ''' })
+            foreach (string[] w in new string[][] { ''' + it.j_table + ''' })
             {
                 object pp = FindCaption(pl, w[0]); if (pp == null) { log.Add("justification: no text '" + w[0] + "'"); continue; }
                 LockQuiet(pp);
@@ -312,7 +292,7 @@ def live_set_property_texts(page: str, ref: str, scheme: str = None, hide: list 
             }
 
             // 6. rotations: degrees in, radians to EPLAN
-            foreach (string[] w in new string[][] { ''' + table2(rot_rows) + ''' })
+            foreach (string[] w in new string[][] { ''' + _table2(it.rot_rows) + ''' })
             {
                 object pp = FindCaption(pl, w[0]); if (pp == null) { log.Add("rotation: no text '" + w[0] + "'"); continue; }
                 LockQuiet(pp);
@@ -325,7 +305,7 @@ def live_set_property_texts(page: str, ref: str, scheme: str = None, hide: list 
 
             // 7. moves: measure-and-correct on the box's top-left corner
             List<Dictionary<string, object>> moves = new List<Dictionary<string, object>>();
-            string[][] wanted = new string[][] { ''' + pos_table + ''' };
+            string[][] wanted = new string[][] { ''' + it.pos_table + ''' };
             foreach (string[] w in wanted)
             {
                 Dictionary<string, object> mv = new Dictionary<string, object>();
@@ -358,13 +338,132 @@ def live_set_property_texts(page: str, ref: str, scheme: str = None, hide: list 
                 mv["reached"] = reached; mv["rounds"] = rounds; if (cur != null) mv["final"] = cur;
                 moves.Add(mv);
             }
-            results["moves"] = moves;
-            results["after"] = CaptionBoxes(pl);
-            results["log"] = log;
-            results["success"] = true;
+            ir["moves"] = moves;
+            ir["after"] = BRIEF ? TouchedCaptions(pl, ''' + _arr(it.touched) + ''') : CaptionBoxes(pl);
+            ir["log"] = log;
+            ir["success"] = true;
+            }
+            catch (Exception ex) { ir["success"] = false; ir["error"] = Flatten(ex); failed++; }
+            items.Add(ir);
+            }
 '''
-    return _execute_script(
+
+
+def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide: list = None,
+                            show: list = None, positions: dict = None, rotations: dict = None,
+                            heights: dict = None, justifications: dict = None,
+                            items: list = None, brief: bool = True,
+                            allow_real_project: bool = False,
+                            timeout_seconds: float = 300.0) -> dict:
+    """
+    Arrange the property texts of one placement - or of MANY in one script
+    with `items`. WRITES - scratch-only by default.
+
+    Per placement: pick a scheme, hide / show, move, rotate, resize, justify.
+    Order of work: scheme (puts the placement on that shared arrangement),
+    then the switch to a LOCAL arrangement (UseLocalPropertyPlacements, so
+    the per-text edits touch only this placement and survive closing the
+    project), then show, hide, heights, justifications, rotations, and the
+    moves last (a move is measured on the box, which the other edits change).
+    A move is given as the wanted TOP-LEFT of the text box in page mm and
+    reached by measure-and-correct (undock, move, re-measure; a few rounds).
+
+    BATCH: a dense page has 60-90 placements to arrange; one call per
+    placement cost 1.6 s of EPLAN plus a model turn each (612 calls on four
+    pages, measured). Pass `items=[{"ref": "-X01", "positions": {...}},
+    {"ref": "-B3", "hide": ["22002"]}, ...]` - every item takes the same keys
+    as the top-level arguments - and the whole list runs in ONE script; an
+    item that fails is reported in its own entry and the rest still run.
+
+    Typical dense-I/O use: {"positions": {"20010": [x, y_above_box]},
+    "rotations": {"20011": 90}, "hide": ["22002"]} on each black box, and
+    {"hide": ["20011"]} on the cable and the Y.
+
+    Args:
+        page: Page name.
+        ref: The placement's handle, its full tag, or the bare "-X01"
+            (suffix match). Must resolve to exactly one placement; several
+            -> error listing the handles (use eplan_live_property_texts).
+            Omit when `items` is given.
+        scheme: Name of a property arrangement scheme (exact, or a unique
+            case-insensitive prefix: "Arriba a la izquierda, fuera 90").
+            eplan_live_property_texts(with_schemes=True) lists them.
+        hide, show: Texts to hide / show, each a property id (20011,
+            "20011") or the exact displayed text ("-X01").
+        positions: {selector: [x, y]} - wanted top-left of the text box.
+        rotations: {selector: degrees} - 0 horizontal, 90 reads upwards.
+        heights: {selector: mm} - text height.
+        justifications: {selector: name} - a JustificationType name
+            ("TopLeft", "MiddleCenter", "BottomLeft", ...; the error lists
+            them).
+        items: [{"ref", "scheme"?, "hide"?, "show"?, "positions"?,
+            "rotations"?, "heights"?, "justifications"?}, ...] - many
+            placements in one script. With `items`, the top-level ref and
+            edit arguments must be empty.
+        brief: Default True: the result carries only the texts that were
+            touched ("after") and no "before" list - one call used to
+            return 2-4 KB, which on 600 calls is a context full of boxes
+            nobody reads. False returns every caption before and after.
+        allow_real_project: Must be True to write outside the scratch root.
+        timeout_seconds: Default 300.
+
+    Returns:
+        One ref: {"success", "handle", "name", "useLocal", "scheme",
+        "after": [captions touched], "moves": [{"selector", "target",
+        "reached", "rounds", "final"}], "log": [...], "before" (brief=False)}.
+        With items: {"success" (all items ok), "count", "failed",
+        "items": [{"ref", "success", "handle", "name", ..., "error"?}]}.
+    """
+    try:
+        page_cs = cs_escape(cs_text(page, "page"))
+        single = dict(scheme=scheme, hide=hide, show=show, positions=positions, rotations=rotations,
+                      heights=heights, justifications=justifications)
+        if items is not None:
+            if not isinstance(items, list) or not items:
+                raise SchematicValueError("items must be a non-empty list of {ref, ...} dicts.")
+            if ref or any(v for v in single.values()):
+                raise SchematicValueError("With items, pass the edits inside each item, not at the top level.")
+            parsed = []
+            for i, it in enumerate(items):
+                if not isinstance(it, dict) or not it.get("ref"):
+                    raise SchematicValueError("items[%d] must be a dict with a ref." % i)
+                parsed.append(_TextItem(**it))
+        else:
+            if not ref:
+                raise SchematicValueError("ref is required (or pass items).")
+            parsed = [_TextItem(ref, **single)]
+    except (SchematicValueError, TypeError, ValueError) as exc:
+        return _err(exc if isinstance(exc, SchematicValueError) else SchematicValueError(str(exc)))
+
+    def arr(values):
+        return "new string[] { " + ", ".join('"%s"' % i for i in values) + " }"
+
+    def table2(rows):
+        return ", ".join('new string[] { "%s", "%r" }' % (s_, v) for s_, v in rows)
+
+    blocks = "".join(_text_item_block(it) for it in parsed)
+    body = _guard_prelude(allow_real_project) + '''
+            object page = FindPage(project, "''' + page_cs + '''");
+            LockQuiet(page);
+            List<object> items = new List<object>();
+            int failed = 0;
+''' + blocks + '''
+            results["items"] = items; results["count"] = items.Count; results["failed"] = failed;
+            results["success"] = failed == 0;
+'''
+    body = body.replace("BRIEF", "true" if brief else "false")
+    r = _execute_script(
         live._script("LiveSetPropertyTexts_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_PANEL + _HELPERS_CAPTIONS),
         timeout=timeout_seconds,
     )
+    res = r.get("results") if isinstance(r.get("results"), dict) else None
+    if items is None and isinstance(res, dict) and isinstance(res.get("items"), list) and len(res["items"]) == 1:
+        # one ref: the same flat shape as before the batch form existed
+        flat = dict(res["items"][0]); flat.pop("ref", None)
+        flat["project"] = res.get("project")
+        r["results"] = flat
+        r["success"] = bool(flat.get("success"))
+        if not flat.get("success") and flat.get("error"):
+            r["error"] = flat["error"]
+    return r

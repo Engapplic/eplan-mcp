@@ -52,7 +52,7 @@ It exposes **250 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
+  batches skip the compile; every tool's JSON is compact, not pretty-printed, edit ops echo only handle / name / location / the values written (`brief`, default) and `eplan_live_remove_placement` is brief by default: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
@@ -287,7 +287,11 @@ All of these exist as `eplan_*` tools:
   box: pick a property arrangement scheme by name, hide/show, move to a
   top-left corner, rotate in degrees, set height and justification; the
   dense-I/O recipe is tag above the box, function text vertical, cable and Y
-  texts hidden),
+  texts hidden),  - `eplan_live_set_property_texts` also takes `items=[{"ref", "positions",
+  "hide", ...}, ...]`: every placement of a dense page in ONE script instead
+  of one call each (612 calls on four pages, measured); the result is
+  compact by default (`brief`: only the texts touched, no "before" list),
+
   `eplan_live_copy_pages_to_structure` (repeated stations: copy drawn
   pages to =ST2, =ST3 ... and retag every device on the copies, keeping the
   shared ones such as the CPU; wire numbers and PLC addresses are copied
@@ -303,7 +307,10 @@ All of these exist as `eplan_*` tools:
   structure, then assign the crossed connections and regenerate; with a
   part the conductors take the part's colours and cross-sections, the
   conductors locked first; `scheme` / `show` arrange the line's own
-  property texts; keep the line clear of the wire-number symbols; wires
+  property texts; keep the line clear of the wire-number symbols; the
+  connection updates, the conductor read and the reassign run inside the
+  assignment script (CommandLineInterpreter), ~6 scripts per cable instead
+  of ~20; wires
   drawn in this session get one connection update first; the crossing
   points a DELETED line left on the wires are removed first, since a wire
   that still carries one never links to a new line - `orphanPoints`),
