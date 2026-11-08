@@ -1134,3 +1134,45 @@ def test_tool_wrapper_returns_compact_json():
     wrapped = server._json_wrapper(lambda: {"a": [1, 2], "b": {"x": 1.5}})
     assert wrapped() == '{"a":[1,2],"b":{"x":1.5}}'
     assert json.loads(wrapped()) == {"a": [1, 2], "b": {"x": 1.5}}
+
+
+def test_copy_region_script_and_chain(monkeypatch):
+    """Region -> temp window macro -> insert -> rename maps; then one
+    connection update and the cable chain on every copied cable."""
+    from api.actions import copy_live, generate, cables_live
+    scripts = []
+    monkeypatch.setattr(copy_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+                            "success": True, "inserted": 9, "cables": ["c1", "c2"], "renamed": 5, "copied": []}})
+    gens, assigns = [], []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections",
+                        lambda page, h, **kw: assigns.append((page, h, kw)) or {"results": {"success": True, "handle": h, "conductors": [{"designation": "1", "colour": "BN"}]}})
+    r = copy_live.live_copy_region("=ST1+CAMPO/10", 100, 40, 160, 200, x=170, y=40,
+                                   rename={"=ST1": "=ST3", "-MB01": "-MB50"}, text_replace={"Cilindro 1": "Cilindro 3"},
+                                   pin_colours="sensor")
+    cs = scripts[0]
+    assert _string_literals_balanced(cs)
+    assert 'FindPage(project, "=ST1+CAMPO/10")' in cs and cs.count('FindPage(project, "=ST1+CAMPO/10")') == 2, "same page by default"
+    assert "double rx1 = 100.0, ry1 = 40.0, rx2 = 160.0, ry2 = 200.0;" in cs and "bool inside = false" in cs
+    assert 'Enum.Parse(cp[1].ParameterType, "MultiLine")' in cs and "WindowMacro.Create" in cs and 'm.Name != "WindowMacro"' in cs
+    assert "MakePoint(wp[4].ParameterType, 170.0, 40.0)" in cs
+    assert 'new string[] { "=ST1", "=ST3" }, new string[] { "-MB01", "-MB50" }' in cs
+    assert 'new string[] { "Cilindro 1", "Cilindro 3" }' in cs
+    assert "static string Apply(string s, string[][] map)" in cs and "LockHard(o)" in cs
+    # free texts are MultiLangStrings: read with GetAsString, written with SetAsString
+    assert 'TryRead(o, "Contents", null)' in cs and 'GetMethod("GetAsString", Type.EmptyTypes)' in cs and 'GetMethod("SetAsString", new Type[] { typeof(string) })' in cs
+    res = r["results"]
+    assert gens == [{"project_name": None, "page_name": "=ST1+CAMPO/10"}]
+    assert [a[1] for a in assigns] == ["c1", "c2"] and assigns[0][2]["reassign_from_part"] is True and assigns[0][2]["pin_colours"] == "sensor"
+    assert res["cableResults"][0]["conductors"] == [("1", "BN")] and r["success"] is True
+    # another page, same spot is fine; the same page at the same spot is not
+    scripts.clear()
+    copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, to_page="+CE/3")
+    assert 'FindPage(project, "+CE/3")' in scripts[0] and "MakePoint(wp[4].ParameterType, 0.0, 0.0)" in scripts[0]
+    assert copy_live.live_copy_region("+CE/2", 0, 0, 10, 10)["success"] is False
+    assert copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename=["a"])["success"] is False
+    # touch mode and corner order
+    scripts.clear()
+    copy_live.live_copy_region("+CE/2", 160, 200, 100, 40, x=170, y=40, touch=True, cables=False)
+    assert "double rx1 = 100.0, ry1 = 40.0, rx2 = 160.0, ry2 = 200.0;" in scripts[0] and "bool inside = true" in scripts[0]

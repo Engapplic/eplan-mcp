@@ -364,6 +364,7 @@ from .captions_live import (
     live_set_property_texts,
 )
 
+from .copy_live import live_copy_region
 from .structure_live import (
     live_copy_pages_to_structure,
 )
@@ -563,6 +564,7 @@ __all__ = [
     # Live DataModel
     'live_report_types', 'live_create_report',
     'live_copy_pages_to_structure',
+    'live_copy_region',
     'live_panel_captions', 'live_set_panel_captions',
     'live_property_texts', 'live_set_property_texts',
     'live_terminal_strips', 'live_set_terminal_strip_definition',

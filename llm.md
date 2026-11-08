@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **250 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **251 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -301,6 +301,10 @@ All of these exist as `eplan_*` tools:
   `eplan_live_set_terminal_strip_definition` (create the missing
   definition - unplaced, or placed as SPECIAL/TDEF on a page - with text
   and part; PLC connection points are not strip terminals),
+  `eplan_live_copy_region` (copy everything inside a rectangle of a page
+  to another place or page as a temporary window macro, renamed through
+  {old: new} maps for tags and texts - one validated sensor column becomes
+  the next in one call, cables re-assigned with part colours by pin),
   `eplan_live_cables` (cables with their conductors: wire number, colour,
   cross-section, source, target), `eplan_live_place_cable_definition`
   (draw the cable definition line across wires, name it with the page's
