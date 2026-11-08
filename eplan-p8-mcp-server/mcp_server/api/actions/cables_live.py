@@ -129,7 +129,105 @@ _HELPERS_CABLE = r'''
         if (o == null) return;
         try { MethodInfo lk = o.GetType().GetMethod("LockObject", Type.EmptyTypes); if (lk != null) lk.Invoke(o, null); } catch { }
     }
+
+    // LockObject plus SmartLock: a connection definition point of a real
+    // project refused CONNECTION_WIRENUMBER (object not locked for write
+    // access) after LockObject alone (P26009, 2026-11-07).
+    static void LockHard(object o)
+    {
+        if (o == null) return;
+        LockAny(o);
+        try { MethodInfo sm = o.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(o, null); } catch { }
+    }
+
+    // The designation of the pin a conductor lands on. A black box drawn
+    // as SPECIAL/DC + DCP has every symbol pin named "1": the real
+    // designation is the DCP function's own (=+-B3:4 gives 4), then the
+    // symbol pin's.
+    static string PinDesignation(object sr, object pin)
+    {
+        string n = sr == null ? "" : (PropText(sr, "Name") ?? "");
+        int c = n.LastIndexOf(':');
+        if (c >= 0 && c < n.Length - 1) return n.Substring(c + 1);
+        object props = sr == null ? null : TryRead(sr, "Properties", null);
+        string fcd = props == null ? null : PropText(props, "FUNC_CONNECTIONDESIGNATION");
+        if (!string.IsNullOrEmpty(fcd)) { int nl = fcd.IndexOf('\n'); return nl > 0 ? fcd.Substring(0, nl) : fcd; }
+        return pin == null ? "" : (PropText(pin, "Designation") ?? "");
+    }
 '''
+
+
+# Crossing points left behind by a DELETED cable line. Drawing a cable line
+# in the GUI (and live_decorate_cable_crossings) puts a zero-size connection
+# definition point on every crossed wire, right on the line. Delete the line
+# and those points stay: the wire keeps KindOfWire = Cable with no
+# CableDefinitionLine, and a NEW line placed over it never links (verified
+# in scratch 2026-11-07: three generates, zero conductors, even after the
+# name parts were rewritten; removing those points and regenerating turned
+# the wires back into IndividualConnection and the next line linked at
+# once). EPLAN links a line to its wires only in the first connection
+# update after the line is created, so the points must go BEFORE the line
+# is placed - a line already placed over them has to be re-placed.
+_ORPHAN_BODY = '''
+            object page = FindPage(project, "PAGENAME");
+            double sx1 = SX1, sy1 = SY1, sx2 = SX2, sy2 = SY2;
+            bool horiz = Math.Abs(sx2 - sx1) >= Math.Abs(sy2 - sy1);
+            double lo = horiz ? Math.Min(sx1, sx2) : Math.Min(sy1, sy2), hi = horiz ? Math.Max(sx1, sx2) : Math.Max(sy1, sy2);
+            double axis = horiz ? (sy1 + sy2) / 2.0 : (sx1 + sx2) / 2.0;
+            List<object> snap = new List<object>();
+            foreach (object q0 in (IEnumerable)PagePlacements(page)) snap.Add(q0);
+            List<Dictionary<string, object>> found = new List<Dictionary<string, object>>();
+            List<string> errors = new List<string>();
+            int removed = 0;
+            foreach (object pl in snap)
+            {
+                if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                object loc = TryRead(pl, "Location", null); if (loc == null) continue;
+                double x = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), y = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+                double along = horiz ? x : y, across = horiz ? y : x;
+                if (Math.Abs(across - axis) > 0.3 || along < lo - 0.3 || along > hi + 0.3) continue;
+                string kind = Convert.ToString(TryRead(pl, "KindOfWire", null));
+                object line = TryRead(pl, "CableDefinitionLine", null);
+                string name = PropText(pl, "Name") ?? "";
+                object pp = TryRead(pl, "Properties", null);
+                string des = pp == null ? "" : (PropText(pp, "CONNECTION_DESIGNATION") ?? "");
+                bool nameless = name == "" || name.EndsWith("+") || name.EndsWith("=");
+                // orphan: a cable-kind point with no line, or a nameless
+                // point with no wire number sitting exactly on the line
+                bool orphan = line == null && (kind == "Cable" || (nameless && des == ""));
+                if (!orphan) continue;
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(pl); d["name"] = name; d["kind"] = kind; d["x"] = x; d["y"] = y;
+                if (DOREMOVE)
+                {
+                    try { LockAny(page); LockHard(pl); pl.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(pl, null); d["removed"] = true; removed++; }
+                    catch (Exception e) { d["error"] = Flatten(e); errors.Add(Flatten(e)); }
+                }
+                found.Add(d);
+            }
+            results["orphanPoints"] = found;
+            results["removed"] = removed;
+            results["errors"] = errors;
+            results["success"] = errors.Count == 0;
+'''
+
+
+def _orphan_points(page: str, coords, remove: bool, allow_real_project: bool,
+                   timeout_seconds: float) -> dict:
+    # Find (and with remove=True delete) the crossing points a deleted cable
+    # line left on the wires along the segment coords=(x1, y1, x2, y2).
+    body = (_guard_prelude(allow_real_project)
+            + _ORPHAN_BODY.replace("PAGENAME", cs_escape(page))
+            .replace("SX1", repr(float(coords[0]))).replace("SY1", repr(float(coords[1])))
+            .replace("SX2", repr(float(coords[2]))).replace("SY2", repr(float(coords[3])))
+            .replace("DOREMOVE", "true" if remove else "false"))
+    r = _execute_script(
+        live._script("LiveCableOrphans_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    return res if isinstance(res, dict) else {"success": False, "error": str(res)}
 
 
 _ASSIGN_BODY = '''
@@ -226,6 +324,29 @@ _ASSIGN_BODY = '''
             results["cable"] = PropText(cable, "Name");
             results["handle"] = Handle(cable);
             results["orientation"] = horizontal ? "horizontal" : "vertical";
+            try
+            {
+                // the line as it was drawn (start = Location, end = the far
+                // corner of the bounding box pulled in by the pen width), so
+                // the caller can re-place it on the same wires
+                object cl = TryRead(cable, "Location", null);
+                double lx = Convert.ToDouble(cl.GetType().GetProperty("X").GetValue(cl, null)), ly = Convert.ToDouble(cl.GetType().GetProperty("Y").GetValue(cl, null));
+                double pen = horizontal ? (cy2 - cy1) / 2.0 : (cx2 - cx1) / 2.0;
+                double ex = horizontal ? (Math.Abs(lx - (cx1 + pen)) < Math.Abs(lx - (cx2 - pen)) ? cx2 - pen : cx1 + pen) : lx;
+                double ey = horizontal ? ly : (Math.Abs(ly - (cy1 + pen)) < Math.Abs(ly - (cy2 - pen)) ? cy2 - pen : cy1 + pen);
+                results["cableStart"] = new double[] { lx, ly }; results["cableEnd"] = new double[] { ex, ey };
+                results["cableVisibleName"] = PropText(cable, "VisibleName") ?? "";
+                object cprops = TryRead(cable, "Properties", null);
+                results["cableText"] = cprops == null ? "" : (PropText(cprops, "FUNC_TEXT") ?? "");
+                List<string> cparts = new List<string>();
+                object cars = TryRead(cable, "ArticleReferences", null);
+                if (cars != null) foreach (object ar in (IEnumerable)cars) cparts.Add(PropText(ar, "PartNr") ?? "");
+                results["cableParts"] = cparts;
+                object sv = TryRead(cable, "SymbolVariant", null); object sy = sv == null ? null : TryRead(sv, "Symbol", null);
+                results["cableSymbol"] = sy == null ? null : PropText(sy, "Name");
+                results["cableVariant"] = sv == null ? null : TryRead(sv, "VariantNr", null);
+            }
+            catch (Exception ge) { results["geometryError"] = Flatten(ge); }
             results["crossed"] = assigned;
             results["errors"] = errors;
             results["success"] = errors.Count == 0;
@@ -251,17 +372,26 @@ _REASSIGN_TAIL = '''
                 // (object not locked for write access) on P26009 (2026-11-06).
                 LockAny(cable);
                 try { object pg0 = TryRead(cable, "Page", null); if (pg0 != null) LockAny(pg0); } catch { }
-                int lockedConductors = 0;
+                int lockedConductors = 0, lockedPoints = 0;
+                // DoReassignWires writes the conductor data into the
+                // connection definition points on the wires (verified in
+                // scratch): lock those too.
+                try
+                {
+                    foreach (object pl in PagePlacements(page))
+                        if (pl != null && pl.GetType().Name == "ConnectionDefinitionPoint") { LockHard(pl); lockedPoints++; }
+                }
+                catch (Exception lpe) { errors.Add("lock points: " + Flatten(lpe)); }
+                results["lockedPoints"] = lockedPoints;
                 try
                 {
                     object ccs = TryRead(cable, "CableConnections", null);
                     if (ccs != null) foreach (object cc in (IEnumerable)ccs)
                     {
                         if (cc == null) continue;
-                        LockAny(cc);
-                        LockAny(TryRead(cc, "StartSymbolReference", null));
-                        LockAny(TryRead(cc, "EndSymbolReference", null));
-                        try { MethodInfo sm = cc.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(cc, null); } catch { }
+                        LockHard(cc);
+                        LockHard(TryRead(cc, "StartSymbolReference", null));
+                        LockHard(TryRead(cc, "EndSymbolReference", null));
                         lockedConductors++;
                     }
                 }
@@ -331,9 +461,10 @@ _DECORATE_BODY = """
                 d["handle"] = Handle(pl); d["at"] = horizontal ? lx : ly;
                 try
                 {
-                    LockAny(pl);
+                    LockHard(pl);
                     object cc = null;
                     foreach (object[] c in cond) if (Math.Abs((double)c[0] - (horizontal ? lx : ly)) < 0.05) { cc = c[1]; break; }
+                    if (cc != null) { LockHard(cc); LockHard(TryRead(cc, "StartSymbolReference", null)); LockHard(TryRead(cc, "EndSymbolReference", null)); }
                     if (nm != cableName) { try { GetWritable(pl.GetType(), "Name").SetValue(pl, cableName, null); d["named"] = true; } catch (Exception ne) { d["nameError"] = Flatten(ne); } }
                     object props = TryRead(pl, "Properties", null);
                     if (cc != null && props != null)
@@ -343,7 +474,13 @@ _DECORATE_BODY = """
                         {
                             string v = cp == null ? null : PropText(cp, pn);
                             if (string.IsNullOrEmpty(v)) continue;
-                            try { SetProp(props, pn, v); d[pn] = v; } catch (Exception pe) { d[pn + "_error"] = Flatten(pe); }
+                            string perr = null;
+                            for (int attempt = 0; attempt < 2; attempt++)
+                            {
+                                try { SetProp(props, pn, v); d[pn] = v; perr = null; break; }
+                                catch (Exception pe) { perr = Flatten(pe); LockHard(pl); }
+                            }
+                            if (perr != null) d[pn + "_error"] = perr;
                         }
                     }
                     else d["conductor"] = "none";
@@ -377,6 +514,53 @@ _DECORATE_BODY = """
                 catch (Exception e) { d["error"] = Flatten(e); errors.Add(Flatten(e)); }
                 points.Add(d);
             }
+            // "Asignar conexiones" leaves a SECOND connection definition
+            // point a few mm off the line on every crossed wire that had
+            // none (48 red bars on P26009). Its data is already on the
+            // crossing point, so it is hidden (default), removed or kept.
+            string extraMode = "EXTRA_MODE";
+            List<Dictionary<string, object>> extras = new List<Dictionary<string, object>>();
+            if (extraMode != "keep")
+            {
+                foreach (object pl in PagePlacements(page))
+                {
+                    if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                    object loc = TryRead(pl, "Location", null);
+                    if (loc == null) continue;
+                    double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+                    double off = horizontal ? Math.Abs(ly - cmid) : Math.Abs(lx - cmid);
+                    if (off < 0.05 || off > 6.0) continue;                    // on the line itself, or far away
+                    bool onWire = false;
+                    foreach (object[] c in cond) if (Math.Abs((double)c[0] - (horizontal ? lx : ly)) < 0.05) { onWire = true; break; }
+                    if (!onWire) continue;
+                    string nm = PropText(pl, "Name") ?? "";
+                    if (nm != "" && nm != "=+" && nm != cableName) continue;
+                    object pp0 = TryRead(pl, "Properties", null);
+                    string des = pp0 == null ? "" : (PropText(pp0, "CONNECTION_DESIGNATION") ?? "");
+                    if (des != "") continue;                                   // a real wire-number label: keep
+                    Dictionary<string, object> e = new Dictionary<string, object>();
+                    e["handle"] = Handle(pl); e["at"] = new double[] { lx, ly };
+                    try
+                    {
+                        LockHard(pl);
+                        if (extraMode == "remove") { pl.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(pl, null); e["action"] = "removed"; }
+                        else
+                        {
+                            int hidden = 0;
+                            object pps2 = TryRead(pl, "PropertyPlacements", null);
+                            if (pps2 != null) foreach (object pp in (IEnumerable)pps2)
+                            {
+                                if (pp == null) continue;
+                                try { LockAny(pp); GetWritable(pp.GetType(), "IsVisible").SetValue(pp, false, null); hidden++; } catch { }
+                            }
+                            e["action"] = "hidden"; e["texts"] = hidden;
+                        }
+                    }
+                    catch (Exception ex) { e["error"] = Flatten(ex); errors.Add(Flatten(ex)); }
+                    extras.Add(e);
+                }
+            }
+            results["extraPoints"] = extras;
             results["cable"] = cableName; results["handle"] = Handle(cable);
             results["crossingPoints"] = points;
             results["errors"] = errors; results["success"] = errors.Count == 0;
@@ -436,12 +620,13 @@ MAPROWS
                     object sp = TryRead(cc, "StartSymbolConnPoint", null), ep = TryRead(cc, "EndSymbolConnPoint", null);
                     // the pin designation lives on StartPin / EndPin (what live_read_connections reports)
                     object p1o = TryRead(cc, "StartPin", null), p2o = TryRead(cc, "EndPin", null);
-                    string pin1 = p1o == null ? "" : (PropText(p1o, "Designation") ?? ""), pin2 = p2o == null ? "" : (PropText(p2o, "Designation") ?? "");
+                    object srA = TryRead(cc, "StartSymbolReference", null), srB = TryRead(cc, "EndSymbolReference", null);
+                    string pin1 = PinDesignation(srA, p1o), pin2 = PinDesignation(srB, p2o);
                     d["pins"] = new string[] { pin1, pin2 };
                     // The pin that counts is the DEVICE's (the sensor's M8
                     // 1/3/4), not the terminal's (a terminal has pins 1/2
                     // too): prefer the end that is not a Terminal.
-                    object sr1 = TryRead(cc, "StartSymbolReference", null), sr2 = TryRead(cc, "EndSymbolReference", null);
+                    object sr1 = srA, sr2 = srB;
                     bool t1 = sr1 != null && sr1.GetType().Name == "Terminal", t2 = sr2 != null && sr2.GetType().Name == "Terminal";
                     string[] order = (t1 && !t2) ? new string[] { pin2, pin1 } : new string[] { pin1, pin2 };
                     string want = null, pin = null;
@@ -449,8 +634,7 @@ MAPROWS
                     if (want == null) { d["result"] = "no pin in map"; rows.Add(d); continue; }
                     d["pin"] = pin; d["colour"] = want; d["pinSide"] = pin == pin1 ? "start" : "end";
                     if ((string)d["before"] == want) { d["result"] = "already"; rows.Add(d); continue; }
-                    LockAny(cc);
-                    LockAny(sr1); LockAny(sr2);
+                    LockHard(cc); LockHard(sr1); LockHard(sr2);
                     int written = 0;
                     try { SetProp(cp, "CONNECTION_WIRENUMBER", want); written++; } catch (Exception e1) { d["connectionError"] = Flatten(e1); }
                     // the connection definition points on this wire (the
@@ -474,7 +658,7 @@ MAPROWS
                                 ? (Math.Abs(lx - x1) < 0.05 && ly >= Math.Min(y1, y2) - 0.05 && ly <= Math.Max(y1, y2) + 0.05)
                                 : (Math.Abs(y1 - y2) < 0.01 && Math.Abs(ly - y1) < 0.05 && lx >= Math.Min(x1, x2) - 0.05 && lx <= Math.Max(x1, x2) + 0.05);
                             if (!on) continue;
-                            try { LockAny(pl); SetProp(TryRead(pl, "Properties", null), "CONNECTION_WIRENUMBER", want); cdps++; } catch (Exception e2) { d["cdpError"] = Flatten(e2); }
+                            try { LockHard(pl); SetProp(TryRead(pl, "Properties", null), "CONNECTION_WIRENUMBER", want); cdps++; } catch (Exception e2) { d["cdpError"] = Flatten(e2); }
                         }
                         d["pointsWritten"] = cdps;
                     }
@@ -557,6 +741,7 @@ CROSSING_STYLE = {"rotation": 90.0, "height": 1.8, "docked": False, "section": T
 
 
 def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
+                                  extra_points: str = "hide",
                                   allow_real_project: bool = False,
                                   timeout_seconds: float = 180.0) -> dict:
     """
@@ -580,11 +765,17 @@ def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
             (True = attached to the point by the scheme, no rotation /
             offset), "section": True (False hides the cross-section),
             "section_height": 1.3}. Defaults = the Festo macro look.
+        extra_points: What to do with the second connection definition
+            point "Asignar conexiones" leaves a few mm off the line on each
+            crossed wire that had none (its data is already on the crossing
+            point): "hide" (default: its texts invisible), "remove" or
+            "keep". A point that carries a wire number is never touched.
         allow_real_project: Must be True to write outside the scratch root.
 
     Returns:
         {"success", "cable", "handle", "crossingPoints": [{"handle", "at",
-         "named", "CONNECTION_WIRENUMBER", ..., "texts"}], "errors"}
+         "named", "CONNECTION_WIRENUMBER", ..., "texts"}], "extraPoints":
+         [{"handle", "at", "action"}], "errors"}
     """
     try:
         page = cs_text(page, "page")
@@ -598,6 +789,8 @@ def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
                 raise SchematicValueError("style: unknown keys %s; valid: %s" % (sorted(unknown), sorted(CROSSING_STYLE)))
             st.update(style)
         rot = float(st["rotation"]); height = float(st["height"]); sh = float(st["section_height"])
+        if extra_points not in ("hide", "remove", "keep"):
+            raise SchematicValueError("extra_points must be 'hide', 'remove' or 'keep'.")
     except (SchematicValueError, TypeError, ValueError) as exc:
         return _err(exc if isinstance(exc, SchematicValueError) else SchematicValueError(str(exc)))
     rad = ((rot % 360.0) + 360.0) % 360.0 * 3.141592653589793 / 180.0
@@ -605,7 +798,8 @@ def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
             + _DECORATE_BODY.replace("PAGENAME", cs_escape(page)).replace("CABLENAME", cs_escape(cable))
               .replace("STYLE_SECTION_HEIGHT", repr(sh)).replace("STYLE_SECTION", "true" if st["section"] else "false")
               .replace("STYLE_DOCKED", "true" if st["docked"] else "false")
-              .replace("STYLE_HEIGHT", repr(height)).replace("STYLE_ROT_RAD", repr(rad)))
+              .replace("STYLE_HEIGHT", repr(height)).replace("STYLE_ROT_RAD", repr(rad))
+              .replace("EXTRA_MODE", extra_points))
     return _execute_script(
         live._script("LiveCableDecor_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
@@ -617,8 +811,9 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                                   reassign_from_part: bool = False,
                                   crossing_texts: bool = True,
                                   crossing_style: dict = None, pin_colours="auto",
+                                  extra_points: str = "hide",
                                   allow_real_project: bool = False,
-                                  timeout_seconds: float = 180.0) -> dict:
+                                  timeout_seconds: float = 180.0, replaced_line: bool = False) -> dict:
     """
     Make the connections a cable definition line crosses its conductors.
     WRITES - scratch-only by default.
@@ -652,6 +847,9 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             "auto" (default: the M8/M12 sensor-lead map, only when the
             part gave sensor-lead colours), "sensor", a {pin: colour}
             dict, or None to leave the template order.
+        extra_points: "hide" (default), "remove" or "keep" the second
+            connection definition points that "Asignar conexiones" leaves
+            off the line (see live_decorate_cable_crossings).
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 180.
 
@@ -659,7 +857,11 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         {"success", "cable", "handle", "orientation", "crossed": [{
         "designation", "source", "target", "assigned": "now"|"already"|
         "failed"}], "errors", "conductors" (after generate), "crossings"
-        (the decoration result)}.
+        (the decoration result)}. When the wires still carried the crossing
+        points of a DELETED line (a wire stays "Cable" kind with no line and
+        a new line never links to it), those points are removed and the line
+        is placed again on the same wires: "replacedLine": True,
+        "orphanPoints", "previousHandle" (the old handle is gone).
     """
     try:
         page = cs_text(page, "page")
@@ -678,6 +880,17 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
 
     r = _run(False)
     res = r.get("results") if isinstance(r.get("results"), dict) else r
+    if generate and isinstance(res, dict) and res.get("success") and not res.get("crossed"):
+        # Wires drawn in this session have no Connection objects until the
+        # first connection update, so a line over freshly placed devices
+        # crosses "nothing": update once and look again.
+        from .generate import generate_connections as _gen0
+        from . import target as _t0
+        _gen0(project_name=_t0.get() or None, page_name=page)
+        r = _run(False)
+        res = r.get("results") if isinstance(r.get("results"), dict) else r
+        if isinstance(res, dict):
+            res["generatedFirst"] = True
     if generate and isinstance(res, dict) and res.get("success"):
         from .generate import generate_connections
         from . import target as _target
@@ -707,12 +920,58 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             conductors = _read()
             if len(conductors) >= wanted:
                 break
+        if not conductors and wanted and not replaced_line:
+            # Nothing linked although wires were assigned: the usual cause
+            # is the crossing points of a DELETED line still sitting on the
+            # wires (see _ORPHAN_BODY). A line already placed over them is
+            # stale for EPLAN, so remove the points, then the line, and
+            # place it again on the same wires.
+            seg = (res.get("cableStart") or []) + (res.get("cableEnd") or [])
+            if len(seg) == 4:
+                orp = _orphan_points(page, seg, True, allow_real_project, timeout_seconds)
+                pts = orp.get("orphanPoints") or []
+                if orp.get("success", True):
+                    # Even with no orphan point found the line is stale by
+                    # now (three updates linked nothing): one re-place is
+                    # cheap, and replaced_line keeps it from looping.
+                    if orp.get("removed"):
+                        generate_connections(project_name=_target.get() or None, page_name=page)
+                    rm = schematic.live_remove_placement(page, handle=res.get("handle"),
+                                                         allow_real_project=allow_real_project,
+                                                         timeout_seconds=timeout_seconds)
+                    rm_res = rm.get("results") if isinstance(rm.get("results"), dict) else rm
+                    if isinstance(rm_res, dict) and rm_res.get("success"):
+                        parts = res.get("cableParts") or []
+                        again = live_place_cable_definition(
+                            page, res.get("cableVisibleName") or res.get("cable") or cable,
+                            seg[0], seg[1], seg[2], seg[3], part=parts[0] if parts else None,
+                            text=res.get("cableText") or None,
+                            symbol=res.get("cableSymbol") or "CABDL", variant=int(res.get("cableVariant") or 0),
+                            generate=True, crossing_texts=crossing_texts, crossing_style=crossing_style,
+                            pin_colours=pin_colours, extra_points=extra_points,
+                            reassign_from_part=reassign_from_part, replaced_line=True,
+                            allow_real_project=allow_real_project, timeout_seconds=timeout_seconds)
+                        again_res = again.get("results") if isinstance(again.get("results"), dict) else again
+                        if isinstance(again_res, dict):
+                            again_res["replacedLine"] = True
+                            again_res["orphanPoints"] = pts
+                            again_res["previousHandle"] = res.get("handle")
+                        return again
+                    res["orphanPoints"] = pts
+                    res["replaceError"] = (rm_res or {}).get("error") if isinstance(rm_res, dict) else str(rm_res)
+                else:
+                    res["orphanPoints"] = pts
+                    res["orphanError"] = orp.get("error") or orp.get("errors")
         if reassign_from_part and conductors:
             # The templates can only be handed to conductors that exist, so
             # this runs after the connection update, then one more update.
             r2 = _run(True)
             res2 = r2.get("results") if isinstance(r2.get("results"), dict) else r2
             res["reassignedFromPart"] = bool(isinstance(res2, dict) and res2.get("reassignedFromPart"))
+            if isinstance(res2, dict):
+                for k in ("lockedPoints", "lockedConductors"):
+                    if k in res2:
+                        res[k] = res2[k]
             if isinstance(res2, dict) and not res2.get("success"):
                 res["reassignError"] = res2.get("error") or res2.get("errors")
             g = generate_connections(project_name=_target.get() or None, page_name=page)
@@ -734,6 +993,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                 res["conductors"] = conductors
         if crossing_texts and conductors:
             dr = live_decorate_cable_crossings(page, res.get("handle") or cable, style=crossing_style,
+                                               extra_points=extra_points,
                                                allow_real_project=allow_real_project,
                                                timeout_seconds=timeout_seconds)
             d_res = dr.get("results") if isinstance(dr.get("results"), dict) else dr
@@ -750,8 +1010,10 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                                 generate: bool = True, scheme: str = None,
                                 show: list = None, crossing_texts: bool = True,
                                 crossing_style: dict = None, pin_colours="auto",
+                                extra_points: str = "hide",
                                 allow_real_project: bool = False,
-                                timeout_seconds: float = 180.0) -> dict:
+                                timeout_seconds: float = 180.0,
+                                reassign_from_part: bool = None, replaced_line: bool = False) -> dict:
     """
     Place a cable definition line across connections and name it. WRITES -
     scratch-only by default.
@@ -800,7 +1062,9 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
     Returns:
         {"success", "handle", "name", "page", "parts", "conductors": [...]} -
         same shape as one entry of live_cables; "propertyTexts" when scheme
-        or show was given.
+        or show was given; "orphanPoints" lists the crossing points of a
+        DELETED line that were removed from these wires first (they would
+        have kept the new line from linking).
     """
     try:
         page = cs_text(page, "page")
@@ -819,6 +1083,16 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
 
     c1 = "%r, %r" % (coords[0], coords[1])
     c2 = "%r, %r" % (coords[2], coords[3])
+    orphans = None
+    if generate:
+        # Crossing points of a deleted line on these wires would stop the
+        # new line from ever linking: remove them first (see _ORPHAN_BODY).
+        orp = _orphan_points(page, coords, True, allow_real_project, timeout_seconds)
+        orphans = orp.get("orphanPoints") or []
+        if orp.get("removed"):
+            from .generate import generate_connections
+            from . import target as _target
+            generate_connections(project_name=_target.get() or None, page_name=page)
 
     body = _guard_prelude(allow_real_project) + '''
             object page = FindPage(project, "''' + cs_escape(page) + '''");
@@ -840,6 +1114,10 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                 cableName = "=" + plant + "+" + loc + cableName;
             }
             GetWritable(fn.GetType(), "Name").SetValue(fn, cableName, null);
+            // The tag shows only once VisibleName is set (like any
+            // function); what the caller typed ("-W1") is what is shown.
+            try { GetWritable(fn.GetType(), "VisibleName").SetValue(fn, "''' + cs_escape(name) + '''", null); results["visibleName"] = "''' + cs_escape(name) + '''"; }
+            catch (Exception ve) { results["visibleNameError"] = Flatten(ve); }
             object props = TryRead(fn, "Properties", null);
             string text = "''' + text_cs + '''";
             string part = "''' + part_cs + '''";
@@ -862,11 +1140,15 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
         timeout=timeout_seconds,
     )
     res = r.get("results") if isinstance(r.get("results"), dict) else r
+    if isinstance(res, dict) and orphans:
+        res["orphanPoints"] = orphans
     if generate and isinstance(res, dict) and res.get("success"):
         a = live_assign_cable_connections(page, res.get("handle"), generate=True,
-                                          reassign_from_part=bool(part),
+                                          reassign_from_part=bool(part) if reassign_from_part is None else reassign_from_part,
+                                          replaced_line=replaced_line,
                                           crossing_texts=crossing_texts,
                                           crossing_style=crossing_style, pin_colours=pin_colours,
+                                          extra_points=extra_points,
                                           allow_real_project=allow_real_project,
                                           timeout_seconds=timeout_seconds)
         a_res = a.get("results") if isinstance(a.get("results"), dict) else a
@@ -874,8 +1156,11 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             res["crossed"] = a_res.get("crossed")
             res["conductors"] = a_res.get("conductors") or []
             res["connectionsGenerated"] = a_res.get("connectionsGenerated")
-            if "reassignedFromPart" in a_res:
-                res["reassignedFromPart"] = a_res.get("reassignedFromPart")
+            for k in ("reassignedFromPart", "lockedPoints", "lockedConductors", "replacedLine", "previousHandle"):
+                if k in a_res:
+                    res[k] = a_res.get(k)
+            if a_res.get("orphanPoints"):
+                res["orphanPoints"] = (res.get("orphanPoints") or []) + list(a_res.get("orphanPoints"))
             if "crossings" in a_res:
                 res["crossings"] = a_res.get("crossings")
             if "pinColours" in a_res:

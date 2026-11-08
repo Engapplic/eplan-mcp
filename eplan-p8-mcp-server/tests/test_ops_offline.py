@@ -389,9 +389,19 @@ def test_image_op_and_wrapper(one_shot):
     assert '"Eplan.EplApi.Base.PathMap"' in cs and '"SubstitutePath"' in cs
     assert '"ARTICLE_PICTUREFILE"' in cs and '"WidthToHeighRatioFix"' in cs
     # the picture of a part / of a device's part
-    ops.live_place_image("=ST1+CAMPO/1", None, 300, 200, 340, 170, part="SMC.D-M9PSAPC", keep_aspect=False)
+    # a part: its picture is read through the parts-database script, the op gets the file
+    monkeypatch_parts = {"success": True, "results": {"success": True, "found": True,
+                         "part": {"Properties": {"ARTICLE_PICTUREFILE": "$(MD_IMG)\SMC\D-M9PSAPC_001.jpg"}}}}
+    import api.actions.scripted as _scripted
+    orig = _scripted.parts_db_get_part
+    _scripted.parts_db_get_part = lambda nr: monkeypatch_parts
+    try:
+        out = ops.live_place_image("=ST1+CAMPO/1", None, 300, 200, 340, 170, part="SMC.D-M9PSAPC", keep_aspect=False)
+    finally:
+        _scripted.parts_db_get_part = orig
     op = one_shot["request"]["ops"][0]
-    assert op["part"] == "SMC.D-M9PSAPC" and "file" not in op and op["keepAspect"] is False
+    assert op["file"].endswith("D-M9PSAPC_001.jpg") and "part" not in op and op["keepAspect"] is False
+    assert out["source"] == "part" and out["part"] == "SMC.D-M9PSAPC"
     ops.live_place_image("=ST1+CAMPO/1", None, 300, 200, 340, 170, ref="=ST1+CAMPO-B1")
     assert one_shot["request"]["ops"][0]["ref"] == "=ST1+CAMPO-B1"
     assert ops.live_place_image("=ST1+CAMPO/1", None, 1, 2, 3, 4)["success"] is False
@@ -432,3 +442,18 @@ def test_resize_op_and_wrapper(one_shot):
     i_sla = cs.index("Call(sla, o, new object[] { MakePoint(pt, bx0, by0), MakePoint(pt, bx1, by1) });")
     assert i_loc < i_sla
     assert 'r["bboxBefore"] = bb;' in cs and 'r["bboxAfter"] = bb;' in cs
+
+
+def test_structure_box_label_scheme(one_shot):
+    ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240)
+    op = one_shot["request"]["ops"][0]
+    assert op["labelScheme"] == "Arriba a la izquierda, dentro 0\u00b0"
+    cs = one_shot["script"]
+    assert 'r["labelScheme"] = SelectSchemeByWords(lb, S(a, "labelScheme", ""));' in cs
+    # whole words only (a 0 must not match 90), shortest name on several hits
+    assert "if (!toks.Contains(w)) { all = false; break; }" in cs and "if (toks.Count < wordsHitLen)" in cs
+    # bare EObjects types in a batch place op
+    assert 'if (t == "Terminal" || t == "PLC" || t == "Cable" || t == "TerminalStrip") return "Eplan.EplApi.DataModel.EObjects." + t;' in cs
+    assert 'return t.StartsWith("Eplan.") ? t : "Eplan.EplApi.DataModel." + t;' in cs
+    ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240, label_scheme=None)
+    assert one_shot["request"]["ops"][0]["labelScheme"] == ""

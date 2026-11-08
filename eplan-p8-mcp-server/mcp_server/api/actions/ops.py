@@ -453,7 +453,8 @@ _OPS_HELPERS = r'''
     static string TypeName(string t)
     {
         if (string.IsNullOrEmpty(t)) return "Eplan.EplApi.DataModel.Function";
-        return t.Contains(".") ? t : "Eplan.EplApi.DataModel." + t;
+        if (t == "Terminal" || t == "PLC" || t == "Cable" || t == "TerminalStrip") return "Eplan.EplApi.DataModel.EObjects." + t;
+        return t.StartsWith("Eplan.") ? t : "Eplan.EplApi.DataModel." + t;
     }
 
     // ---- ops ---------------------------------------------------------------
@@ -602,6 +603,37 @@ _OPS_HELPERS = r'''
         }
     }
 
+    // A property arrangement scheme by name: exact first, then the one
+    // scheme whose name contains every word asked for.
+    static string SelectSchemeByWords(object pl, string wanted)
+    {
+        object sch = TryRead(pl, "PropertyPlacementsSchemas", null);
+        if (sch == null) throw new Exception("Placement has no PropertyPlacementsSchemas.");
+        object lst = sch.GetType().GetMethod("get_All").Invoke(sch, null);
+        char[] seps = new char[] { ' ', ',', '\u00b0', '(', ')' };
+        string[] words = wanted.ToLowerInvariant().Split(seps, StringSplitOptions.RemoveEmptyEntries);
+        object hit = null, wordsHit = null; int wordsHits = 0, wordsHitLen = int.MaxValue;
+        List<string> names = new List<string>();
+        foreach (object o in (IEnumerable)lst)
+        {
+            if (o == null) continue;
+            string n = PropText(o, "Name") ?? "";
+            names.Add(n);
+            if (n == wanted) { hit = o; break; }
+            // whole words only (a 0 must not match 90); several hits ->
+            // the shortest name (the plainest scheme), first one on a tie
+            List<string> toks = new List<string>(n.ToLowerInvariant().Split(seps, StringSplitOptions.RemoveEmptyEntries));
+            bool all = true;
+            foreach (string w in words) if (!toks.Contains(w)) { all = false; break; }
+            if (all) { wordsHits++; if (toks.Count < wordsHitLen) { wordsHit = o; wordsHitLen = toks.Count; } }
+        }
+        if (hit == null && wordsHits >= 1) hit = wordsHit;
+        if (hit == null)
+            throw new Exception("No arrangement scheme matches '" + wanted + "'. Available: " + string.Join(" | ", names.ToArray()));
+        sch.GetType().GetMethod("set_Selected").Invoke(sch, new object[] { hit });
+        return PropText(hit, "Name");
+    }
+
     static void OpStructureBox(object project, object page, JObject a, Dictionary<string, object> r)
     {
         // Structure box ("caja de estructura", LocationBox): a SPECIAL/SC
@@ -649,6 +681,15 @@ _OPS_HELPERS = r'''
             catch (Exception e2) { r["visibleNamePartsError"] = Flatten(e2); }
         }
         r["visibleName"] = vis ?? ""; r["labelRoute"] = labelRoute;
+        // Where the label sits: the default arrangement puts it OUTSIDE the
+        // box (and off the page for a box at the left edge, P26009). The
+        // scheme is picked by name, every word of `labelScheme` matched
+        // case-insensitively ("Arriba a la izquierda, dentro").
+        if (Has(a, "labelScheme") && !string.IsNullOrEmpty(S(a, "labelScheme", "")))
+        {
+            try { r["labelScheme"] = SelectSchemeByWords(lb, S(a, "labelScheme", "")); }
+            catch (Exception e3) { r["labelSchemeError"] = Flatten(e3); }
+        }
         if (Has(a, "properties")) SetProps(lb, (JObject)a["properties"], r);
         r["handle"] = Handle(lb);
         r["name"] = PropText(lb, "Name");
@@ -959,7 +1000,7 @@ _OPS_HELPERS = r'''
     {
         if (string.IsNullOrEmpty(partNr)) return null;
         Type mt = FindType("Eplan.EplApi.MasterData.MDPartsManagement");
-        if (mt == null) throw new Exception("Eplan.EplApi.MasterData.MDPartsManagement not loaded.");
+        if (mt == null) throw new Exception("The parts database (Eplan.EplApi.MasterData.MDPartsManagement) is not loaded in this script; pass the picture with part=\"" + partNr + "\" (the tool reads it through the parts-database script) or file=.");
         object mgmt = Activator.CreateInstance(mt);
         MethodInfo open = mt.GetMethod("OpenDatabase", Type.EmptyTypes);
         if (open == null) throw new Exception("MDPartsManagement has no OpenDatabase(). " + MemberList(mt, true));
@@ -1690,7 +1731,10 @@ def live_batch(page: str, operations: list, read_back: bool = False,
                 plus tag/part applied to every device the macro created.
       structurebox  name ("=ST1+CAMPO": structure only), x1, y1, x2, y2
                 (two corners), assignContents=true (devices whose location
-                is inside take the box's = / +), properties?, symbol=SC.
+                is inside take the box's = / +), labelScheme="Arriba a la
+                izquierda, dentro" (arrangement scheme of the label, words
+                matched; "" keeps EPLAN's default, which puts it outside),
+                properties?, symbol=SC.
       update    ref, plus tag/visibleName/allowMerge/part/properties/
                 functionDefinition.
       move      ref, x, y.
@@ -1879,7 +1923,8 @@ def live_insert_macro(page: str, macro_file: str, x: float, y: float,
 
 def live_place_structure_box(page: str, name: str, x1: float, y1: float, x2: float, y2: float,
                              assign_contents: bool = True, properties: dict = None,
-                             symbol: str = "SC", allow_real_project: bool = False,
+                             symbol: str = "SC", label_scheme: str = "Arriba a la izquierda, dentro 0\u00b0",
+                             allow_real_project: bool = False,
                              timeout_seconds: float = 120.0) -> dict:
     """
     Draw a structure box ("caja de estructura") with two corners and give
@@ -1900,14 +1945,20 @@ def live_place_structure_box(page: str, name: str, x1: float, y1: float, x2: flo
         assign_contents: Rename the devices inside (default True).
         properties: Extra properties {NAME: value} for the box.
         symbol: SPECIAL symbol (default "SC").
+        label_scheme: Property arrangement scheme for the label, by name
+            (exact, or every word contained: the default "Arriba a la
+            izquierda, dentro" picks the inside-top-left scheme). EPLAN's
+            default puts the label outside the box. "" or None keeps it.
         allow_real_project: Must be True to write outside the scratch root.
 
     Returns:
-        {"success", "handle", "name", "bbox": [x0, y0, x1, y1],
+        {"success", "handle", "name", "visibleName", "labelRoute",
+         "labelScheme" | "labelSchemeError", "bbox": [x0, y0, x1, y1],
          "renamed": [{"handle", "from", "to"}], "placed", "engine"}
     """
     op = {"op": "structurebox", "name": name, "x1": float(x1), "y1": float(y1),
-          "x2": float(x2), "y2": float(y2), "assignContents": bool(assign_contents), "symbol": symbol}
+          "x2": float(x2), "y2": float(y2), "assignContents": bool(assign_contents), "symbol": symbol,
+          "labelScheme": label_scheme or ""}
     _optional(op, properties=properties)
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
@@ -1950,11 +2001,26 @@ def live_place_image(page: str, file: str = None, x1: float = 0.0, y1: float = 0
     """
     if not (file or part or ref):
         return {"success": False, "error": "live_place_image needs file, part or ref."}
+    source = "file" if file else ("part" if part else "ref")
+    if not file and part:
+        # The parts database is read by its own compiled script: the ops
+        # interpreter could not resolve MDPartsManagement on P26009.
+        got = scripted.parts_db_get_part(part)
+        g_res = got.get("results") if isinstance(got.get("results"), dict) else got
+        if not (isinstance(g_res, dict) and g_res.get("found")):
+            return {"success": False, "error": "Part '%s' is not in the parts database." % part, "lookup": got}
+        file = ((g_res.get("part") or {}).get("Properties") or {}).get("ARTICLE_PICTUREFILE") or ""
+        if not file:
+            return {"success": False, "error": "Part '%s' has no picture (ARTICLE_PICTUREFILE is empty)." % part}
     op = {"op": "image", "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2),
           "keepAspect": bool(keep_aspect), "copyToProject": bool(copy_to_project)}
-    _optional(op, file=file, part=part, ref=ref, layer=layer)
-    return _single(run_ops(page, [op], allow_real_project=allow_real_project,
-                           timeout_seconds=timeout_seconds))
+    _optional(op, file=file, ref=(ref if not file else None), layer=layer)
+    out = _single(run_ops(page, [op], allow_real_project=allow_real_project,
+                          timeout_seconds=timeout_seconds))
+    if isinstance(out, dict) and out.get("success"):
+        out["source"] = source
+        if part: out["part"] = part
+    return out
 
 
 def live_resize_box(page: str, ref: str, x1: float, y1: float, x2: float, y2: float,
