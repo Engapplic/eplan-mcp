@@ -765,7 +765,7 @@ def test_reassign_locks_conductors_before_doreassignwires(monkeypatch):
     cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False, reassign_from_part=True)
     cs = scripts[0]
     assert _string_literals_balanced(cs)
-    i_lock = cs.index('LockAny(TryRead(cc, "StartSymbolReference", null));')
+    i_lock = cs.index('LockHard(TryRead(cc, "StartSymbolReference", null));')
     i_call = cs.index("m.Invoke(csvc, new object[] { cable, true, excl });")
     assert i_lock < i_call, "conductors and their ends are locked before DoReassignWires"
     assert 'results["lockedConductors"] = lockedConductors;' in cs
@@ -807,7 +807,9 @@ def test_conductor_colours_by_pin_script(monkeypatch):
     cs = captured["script"]
     assert _string_literals_balanced(cs)
     assert 'map["1"] = "BN";' in cs and 'map["4"] = "BK";' in cs and "bool auto = false;" in cs
-    assert 'PropText(p1o, "Designation")' in cs and 'SetProp(cp, "CONNECTION_WIRENUMBER", want);' in cs
+    assert "string pin1 = PinDesignation(srA, p1o), pin2 = PinDesignation(srB, p2o);" in cs and 'SetProp(cp, "CONNECTION_WIRENUMBER", want);' in cs
+    # a DCP black-box pin: the designation comes from the DCP function's name, not the symbol pin
+    assert "int c = n.LastIndexOf(':');" in cs and 'PropText(props, "FUNC_CONNECTIONDESIGNATION")' in cs
     cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="auto")
     cs = captured["script"] if False else None  # _capture keeps the first script only
     assert cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="nope")["success"] is False
@@ -842,6 +844,27 @@ def test_decorate_style_and_pin_colours_passthrough(monkeypatch):
     calls.clear()
     cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False)
     assert calls == [("decor", None)], "no reassign from part: nothing to pair with pins"
+
+
+def test_decorate_extra_points_and_hard_locks(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_decorate_cable_crossings("+CE/2", "-W1")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'string extraMode = "hide";' in cs and 'if (des != "") continue;' in cs
+    assert "LockHard(pl);" in cs and "LockHard(cc);" in cs
+    cables_live.live_decorate_cable_crossings("+CE/2", "-W1", extra_points="remove")
+    assert 'string extraMode = "remove";' in scripts[-1]
+    assert cables_live.live_decorate_cable_crossings("+CE/2", "-W1", extra_points="nope")["success"] is False
+    # reassign locks the page's connection definition points too
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False, reassign_from_part=True)
+    assert 'pl.GetType().Name == "ConnectionDefinitionPoint") { LockHard(pl); lockedPoints++; }' in scripts[-1]
+    # the placed line gets a visible tag
+    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, generate=False)
+    assert 'GetWritable(fn.GetType(), "VisibleName").SetValue(fn, "-W1", null);' in scripts[-1]
 
 
 def test_copy_pages_keeps_subcounter(monkeypatch):
@@ -926,3 +949,90 @@ def test_assign_cable_connections_checks_name_parts_and_locks(monkeypatch):
     assert 'PropText(cnp, "FUNC_CODE")' in cs and "&& named)" in cs, \
         "a connection linked to the line but without the cable's name parts is NOT 'already'"
     assert "LockAny(sr1); LockAny(sr2);" in cs, "pre-existing connections need their ends locked on retry"
+
+
+def test_place_cable_removes_orphan_points_before_the_line(monkeypatch):
+    """Crossing points of a deleted line keep a new line from linking: the
+    placing tool removes them (and updates once) BEFORE Cable.Create."""
+    from api.actions import cables_live, generate
+    scripts, gens = [], []
+    answers = [
+        {"success": True, "results": {"success": True, "removed": 1, "orphanPoints": [{"handle": "p1", "name": "=+", "x": 80.0, "y": 110.0, "removed": True}]}},
+        {"success": True, "results": {"success": True, "handle": "h", "name": "=+CE-W1"}},
+    ]
+    monkeypatch.setattr(cables_live, "_execute_script", lambda s, timeout=0: scripts.append(s) or answers[len(scripts) - 1])
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections",
+                        lambda page, cable, **kw: {"results": {"success": True, "crossed": [], "conductors": []}})
+    r = cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, part="FES.541348")
+    orphan, create = scripts
+    assert _string_literals_balanced(orphan) and "LiveCableOrphans_" in orphan
+    assert "double sx1 = 70.0, sy1 = 110.0, sx2 = 220.0, sy2 = 110.0;" in orphan
+    assert 'bool orphan = line == null && (kind == "Cable" || (nameless && des == ""));' in orphan
+    assert "if (true)" in orphan and 'pl.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(pl, null)' in orphan
+    assert "LiveCableDef_" in create and scripts.index(create) == 1
+    assert gens == [{"project_name": None, "page_name": "+CE/2"}]
+    assert r["results"]["orphanPoints"][0]["handle"] == "p1"
+    # generate=False places the bare line and looks at nothing
+    scripts.clear(); gens.clear(); answers[0] = answers[1]
+    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, generate=False)
+    assert len(scripts) == 1 and "LiveCableDef_" in scripts[0] and gens == []
+
+
+def test_assign_replaces_a_stale_line_when_nothing_links(monkeypatch):
+    """Three updates and no conductor: remove the orphan points, the line,
+    and place it again on the same wires with its part and visible name."""
+    from api.actions import cables_live, generate, schematic
+    assign = {"success": True, "results": {"success": True, "handle": "h", "cable": "=+CE-W1",
+                                             "crossed": [{"designation": "201", "assigned": "now"}],
+                                             "cableStart": [70.0, 110.0], "cableEnd": [220.0, 110.0],
+                                             "cableVisibleName": "-W1", "cableText": "", "cableParts": ["FES.541348"],
+                                             "cableSymbol": "CABDL", "cableVariant": 0}}
+    orphan = {"success": True, "results": {"success": True, "removed": 3, "orphanPoints": [{"handle": "p"}] * 3}}
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: orphan if "LiveCableOrphans_" in s else assign)
+    gens = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables", lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": []}]}})
+    removed, placed = [], []
+    monkeypatch.setattr(schematic, "live_remove_placement",
+                        lambda page, handle=None, **kw: removed.append(handle) or {"results": {"success": True}})
+    monkeypatch.setattr(cables_live, "live_place_cable_definition",
+                        lambda *a, **kw: placed.append((a, kw)) or {"results": {"success": True, "handle": "h2", "conductors": [{"designation": "201"}]}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", reassign_from_part=True, pin_colours="sensor",
+                                                  crossing_style={"rotation": 0}, extra_points="remove")
+    res = r["results"]
+    assert res["replacedLine"] is True and res["previousHandle"] == "h" and len(res["orphanPoints"]) == 3
+    assert removed == ["h"] and len(gens) == 4   # three updates, then one after the points went
+    (a, kw), = placed
+    assert a == ("+CE/2", "-W1", 70.0, 110.0, 220.0, 110.0)
+    assert kw["part"] == "FES.541348" and kw["symbol"] == "CABDL" and kw["replaced_line"] is True
+    assert kw["pin_colours"] == "sensor" and kw["crossing_style"] == {"rotation": 0} and kw["extra_points"] == "remove"
+    assert kw["reassign_from_part"] is True
+    # the re-placed line's own assignment never replaces again
+    removed.clear(); placed.clear()
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", replaced_line=True)
+    assert removed == [] and placed == [] and r["results"]["conductors"] == []
+
+
+def test_assign_updates_once_when_the_line_crosses_nothing_yet(monkeypatch):
+    """Wires drawn in this session have no Connection objects until the
+    first update: the assignment updates once and looks again."""
+    from api.actions import cables_live, generate
+    runs = []
+    def fake(s, timeout=0):
+        runs.append(s)
+        crossed = [] if len(runs) == 1 else [{"designation": "1", "assigned": "now"}]
+        return {"success": True, "results": {"success": True, "handle": "h", "cable": "=+CE-W1", "crossed": crossed}}
+    monkeypatch.setattr(cables_live, "_execute_script", fake)
+    gens = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(1) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "1"}]}]}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", crossing_texts=False)
+    assert r["results"]["generatedFirst"] is True and len(runs) == 2 and len(gens) == 2
+    assert r["results"]["conductors"] == [{"designation": "1"}]
+    # generate=False never updates
+    runs.clear(); gens.clear()
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False)
+    assert len(runs) == 1 and gens == []

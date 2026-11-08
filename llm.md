@@ -64,7 +64,10 @@ It exposes **250 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   EVERY device it brought tagged - a PLC box and its terminals share the
   tag, the part goes on the main function),
   `eplan_live_place_structure_box` (=ST1+CAMPO box by two corners; the
-  devices inside are renamed to its structure), `eplan_live_place_image`
+  devices inside are renamed to its structure; label visible, inside the
+  box by default via `label_scheme` - "Arriba a la izquierda, dentro 0°",
+  matched by whole words, a miss lists the project's schemes),
+  `eplan_live_place_image`
   (the photo of a sensor or valve in a rectangle on the page: a file -
   "$(MD_IMG)\\..." expands -, a part number (its picture from the parts
   database) or a device on the page; aspect kept, copied into the project),
@@ -300,23 +303,32 @@ All of these exist as `eplan_*` tools:
   structure, then assign the crossed connections and regenerate; with a
   part the conductors take the part's colours and cross-sections, the
   conductors locked first; `scheme` / `show` arrange the line's own
-  property texts; keep the line clear of the wire-number symbols),
+  property texts; keep the line clear of the wire-number symbols; wires
+  drawn in this session get one connection update first; the crossing
+  points a DELETED line left on the wires are removed first, since a wire
+  that still carries one never links to a new line - `orphanPoints`),
   `eplan_live_decorate_cable_crossings` (the zero-size "=+" connection
   definition points EPLAN leaves on the line at each crossed wire are
   named after the cable, given the conductor's colour / cross-section and
   show them rotated 90 deg at the crossing like a manufacturer macro - or
-  horizontal, docked, colour only, with `style` / `crossing_style`; run by
-  default from the two tools above, `crossing_texts=False` skips it),
+  horizontal, docked, colour only, with `style` / `crossing_style`; the
+  second point "Asignar conexiones" leaves off the line is hidden,
+  removed or kept with `extra_points`; run by default from the two tools
+  above, `crossing_texts=False` skips it),
   `eplan_live_set_conductor_colours` (colour per PIN, not per template
   order: "Asignar conexiones" hands a sensor lead's BN/BK/BU out in
   template order, so pin 3 got BK; the M8/M12 sensor map 1 BN, 2 WH, 3 BU,
   4 BK, 5 GY or an explicit {pin: colour}; `pin_colours="auto"` on the two
-  tools above applies it when the part gave sensor-lead colours) and
+  tools above applies it when the part gave sensor-lead colours; a DCP
+  black-box pin is read from the DCP function's name, not the symbol pin) and
   `eplan_live_assign_cable_connections` (re-run the geometric assignment
   for a line placed by hand or moved: EPLAN does not assign conductors to
   an API-placed line on its own; a connection EPLAN linked to the line
   without writing the cable into it is assigned too, and pre-existing
-  connections are locked with retries before the write),
+  connections are locked with retries before the write; when three
+  updates link nothing the line is stale: its orphan points are removed
+  and the line is placed again on the same wires - `replacedLine`, the
+  old handle is gone),
   `eplan_live_project_templates` (the .zw9 basic projects / .ept templates
   under $(MD_TEMPLATES)) and `eplan_live_create_project` (new project from
   one of them via ProjectManager.CreateProject, left open and set as the

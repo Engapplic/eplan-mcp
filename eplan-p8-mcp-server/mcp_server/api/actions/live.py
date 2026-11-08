@@ -188,8 +188,8 @@ _HELPERS = '''
         }
         // Not loaded yet: try the managed assembly names, newest scheme first.
         string[] candidates = new string[] {
-            "Eplan.EplApi.DataModelNetu", "Eplan.EplApi.HEServicesNetu",
-            "Eplan.EplApi.DataModelu", "Eplan.EplApi.HEServicesu" };
+            "Eplan.EplApi.DataModelNetu", "Eplan.EplApi.HEServicesNetu", "Eplan.EplApi.MasterDataNetu",
+            "Eplan.EplApi.DataModelu", "Eplan.EplApi.HEServicesu", "Eplan.EplApi.MasterDatau" };
         foreach (string c in candidates)
         {
             try
