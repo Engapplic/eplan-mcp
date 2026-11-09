@@ -1046,7 +1046,11 @@ def live_set_conductor_colours(page: str, cable: str, pin_colours="sensor",
     )
 
 
-CROSSING_STYLE = {"rotation": 90.0, "height": 1.8, "docked": False, "section": True, "section_height": 1.3}
+# The house style (EPLAN design rules, "Mangueras con haz", validated on
+# P26009 2026-11-09): colour horizontal, docked to the crossing point, no
+# per-wire cross-section (the section goes once next to the cable name).
+# The manufacturer-macro look is {"rotation": 90, "docked": False, "section": True}.
+CROSSING_STYLE = {"rotation": 0.0, "height": 1.8, "docked": True, "section": False, "section_height": 1.3}
 
 
 def live_decorate_cable_crossings(page: str, cable: str, style: dict = None,
