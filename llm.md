@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **254 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -112,7 +112,10 @@ It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   2 tools and not a wrapper per class - same call as the action catalog
   below, for the same reason. 11 schematic-authoring
   tools on that same reflection scaffold (`eplan_live_symbol_catalog`,
-  `eplan_live_create_page`, `eplan_live_place_symbol`,
+  `eplan_live_create_page` (with `description`: the page description
+  11011 every page should carry - "Digital inputs SMC module" -, also set
+  later with `eplan_live_set_page_description`; `eplan_live_query_pages`
+  lists it), `eplan_live_place_symbol`,
   `eplan_live_connect_pins`, `eplan_live_read_page`,
   `eplan_live_remove_placement`) that CREATE a schematic rather than only
   reading one - every write returns the page read-back as proof and an undo

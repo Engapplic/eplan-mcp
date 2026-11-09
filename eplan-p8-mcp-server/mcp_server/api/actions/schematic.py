@@ -842,7 +842,7 @@ def live_symbol_catalog(library: str = None, symbol: str = None,
 # ---------------------------------------------------------------------------
 
 def live_create_page(plant: str = None, location: str = None, counter: int = 1,
-                     page_type: str = "Circuit",
+                     page_type: str = "Circuit", description: str = None,
                      allow_real_project: bool = False,
                      timeout_seconds: float = 90.0) -> dict:
     """
@@ -857,17 +857,19 @@ def live_create_page(plant: str = None, location: str = None, counter: int = 1,
     Only name-forming properties can be set at creation time; that is EPLAN's
     own documented restriction on the property list Page.Create accepts.
 
-    There is deliberately NO `description` argument. PagePropertyList has no
-    page-description member - checked by reflection on 2027.0.1, which lists
-    only DESIGNATION_*_DESCR (descriptions OF a structure identifier) and
-    PAGE_CUSTOM_SUPPLEMENTARYFIELD01..100. Setting a description needs the
-    generic Property[AnyPropertyId] indexer and a decision about which property
-    id a "page description" is, which is a separate change rather than a guess
-    made here. Until then, a caller asking for one gets no argument to pass
-    rather than an argument that silently does nothing.
+    The page description (property 11011, "Descripción de página", what the
+    page navigator and the title block show under the page name) is the
+    PagePropertyList member PAGE_NOMINATIOMN (sic) - found by reflection on
+    2026.0.3 and written live. It is set right after the creation, since
+    Page.Create only takes name-forming properties. Give every page one:
+    "Digital inputs SMC module", "Reed sensors ST1-ST6", in the project's
+    languages ("es_ES@...;en_US@...;") or as a plain text.
 
     Args:
         plant: Plant designation (the "=" part). Optional.
+        description: Page description - "es_ES@Entradas digitales;en_US@Digital
+            inputs;" or a plain text. Optional but recommended;
+            live_set_page_description changes it later.
         location: Location designation (the "+" part). Optional.
         counter: Page counter - the numeric part of the name. Default 1.
         page_type: A DocumentTypeManager.DocumentType name. Default "Circuit",
@@ -903,6 +905,7 @@ def live_create_page(plant: str = None, location: str = None, counter: int = 1,
                      "existing pages and is not addressable afterwards.",
         }
 
+    desc_cs = cs_escape(cs_text(description, "description")) if description else None
     sets = []
     if plant_cs:
         sets.append('            routes["DESIGNATION_PLANT"] = SetProp(ppl, "DESIGNATION_PLANT", "%s");\n' % plant_cs)
@@ -953,9 +956,18 @@ def live_create_page(plant: str = None, location: str = None, counter: int = 1,
             if (grid != null) results["gridSize"] = Convert.ToDouble(grid);
             object size = TryRead(page, "Size", null);
             if (size != null) results["size"] = PtDict(size);
+            if (DESCRIPTION != null)
+            {
+                // the description is not name-forming: written after the creation
+                try { MethodInfo lk = page.GetType().GetMethod("LockObject", Type.EmptyTypes); if (lk != null) lk.Invoke(page, null); } catch { }
+                object pprops = TryRead(page, "Properties", null);
+                try { SetProp(pprops, "PAGE_NOMINATIOMN", DESCRIPTION); results["description"] = PropText(pprops, "PAGE_NOMINATIOMN"); }
+                catch (Exception de) { results["descriptionError"] = Flatten(de); }
+            }
             results["page_after"] = ReadPage(page, 50, false, null);
 '''
-    body = _fill(body, PAGETYPE='"%s"' % cs_escape(page_type))
+    body = _fill(body, PAGETYPE='"%s"' % cs_escape(page_type),
+                 DESCRIPTION=('"%s"' % desc_cs) if desc_cs else "null")
 
     raw = _execute_script(
         _script(_cls("MkPage"), body, extra_helpers=_HELPERS_SCHEMATIC),
@@ -969,6 +981,48 @@ def live_create_page(plant: str = None, location: str = None, counter: int = 1,
             out["note"] = ("page_type %r is outside the common set; it was accepted "
                            "by the live enum." % page_type)
     return out
+
+
+def live_set_page_description(page: str, description: str,
+                              allow_real_project: bool = False,
+                              timeout_seconds: float = 60.0) -> dict:
+    """
+    Set (or change) a page's description. WRITES - scratch-only by default.
+
+    The description is property 11011 ("Descripción de página",
+    PagePropertyList.PAGE_NOMINATIOMN): the text the page navigator and the
+    title block show next to the page name, like "Digital inputs SMC module".
+    live_create_page takes the same text as `description` at creation.
+
+    Args:
+        page: Page name, as live_query_pages reports it.
+        description: "es_ES@...;en_US@...;" for the project's languages, or
+            a plain text; "" clears it.
+        allow_real_project: Must be True to write outside the scratch root.
+        timeout_seconds: Default 60.
+
+    Returns:
+        {"success", "page", "description" (read back), "before"}
+    """
+    try:
+        page = cs_text(page, "page")
+        desc_cs = cs_escape(description if description is not None else "")
+    except SchematicValueError as exc:
+        return _err(exc)
+    body = _guard_prelude(allow_real_project) + '''
+            object page = FindPage(project, "''' + cs_escape(page) + '''");
+            try { MethodInfo lk = page.GetType().GetMethod("LockObject", Type.EmptyTypes); if (lk != null) lk.Invoke(page, null); } catch { }
+            object pprops = TryRead(page, "Properties", null);
+            results["page"] = PropText(page, "Name");
+            results["before"] = PropText(pprops, "PAGE_NOMINATIOMN");
+            SetProp(pprops, "PAGE_NOMINATIOMN", "''' + desc_cs + '''");
+            results["description"] = PropText(pprops, "PAGE_NOMINATIOMN");
+            results["success"] = true;
+'''
+    return _shape(_execute_script(
+        _script(_cls("PageDesc"), body, extra_helpers=_HELPERS_SCHEMATIC),
+        timeout=timeout_seconds,
+    ))
 
 
 # ---------------------------------------------------------------------------

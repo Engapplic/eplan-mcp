@@ -741,7 +741,8 @@ def live_query_pages(contains: str = None, limit: int = 100,
         timeout_seconds: Max seconds to wait for the script (default 60).
 
     Returns:
-        dict with "pages" (list of {"name": ..., "pageType": ...}),
+        dict with "pages" (list of {"name": ..., "pageType": ..., "description"
+        when the page has one}),
         "matched", "returned".
     """
     # limit is interpolated into the C# source outside any string literal, so
@@ -770,6 +771,9 @@ def live_query_pages(contains: str = None, limit: int = 100,
                     d["name"] = name == null ? "" : name;
                     string pt = PropText(pg, "PageType");
                     d["pageType"] = pt == null ? "" : pt;
+                    object pp0 = TryRead(pg, "Properties", null);
+                    string desc = pp0 == null ? null : PropText(pp0, "PAGE_NOMINATIOMN");
+                    if (!string.IsNullOrEmpty(desc)) d["description"] = desc;
                     list.Add(d);
                 }
             }

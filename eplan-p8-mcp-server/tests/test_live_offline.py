@@ -1464,3 +1464,27 @@ def test_assign_rebuilds_connections_when_a_pin_feeds_two_conductors(monkeypatch
     res = r["results"]
     assert res["rebuiltFor"] == ["=B17:1"] and any(kw.get("rebuild_all") for kw in calls) and len(res["conductors"]) == 1
     assert res["connectionsGenerated"] == 3
+
+
+def test_page_description_on_create_and_setter(monkeypatch):
+    # the page description is PagePropertyList.PAGE_NOMINATIOMN (11011),
+    # written after Page.Create since it is not name-forming
+    from api.actions import schematic, live
+    scripts = []
+    monkeypatch.setattr(schematic, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True, "page": "+CE/9"}})
+    schematic.live_create_page(location="CE", counter=9, description="es_ES@Entradas digitales;en_US@Digital inputs;")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'SetProp(pprops, "PAGE_NOMINATIOMN", "es_ES@Entradas digitales;en_US@Digital inputs;");' in cs
+    assert cs.index('Call(create, page, new object[] { project, docType, ppl });') < cs.index('"PAGE_NOMINATIOMN"')
+    schematic.live_create_page(location="CE", counter=9)
+    assert "if (null != null)" in scripts[-1]
+    r = schematic.live_set_page_description("+CE/9", "Digital inputs")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs) and 'SetProp(pprops, "PAGE_NOMINATIOMN", "Digital inputs");' in cs
+    assert 'results["before"] = PropText(pprops, "PAGE_NOMINATIOMN");' in cs
+    monkeypatch.setattr(live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    live.live_query_pages()
+    assert 'PropText(pp0, "PAGE_NOMINATIOMN")' in scripts[-1]
