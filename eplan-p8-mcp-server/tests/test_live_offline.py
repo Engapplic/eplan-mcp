@@ -1382,21 +1382,32 @@ def test_window_macro_inserts_lock_the_whole_page_first(monkeypatch):
     assert cs.index("LockTree(page);\n            foreach (object pl0") < cs.index("wm6.Invoke(ins")
 
 
-def test_nested_functions_follow_their_box(monkeypatch):
-    # a DCP pin inside a black box composes its name from the box: writing
-    # the full name into it doubles the code ("-B17-B17:1", P26009 /13), so
-    # copy_region and the structure box leave nested functions' names alone
+def test_black_box_pins_follow_their_box(monkeypatch):
+    # a DCP pin keeps only ":n" as its name: the box supplies the DT and the
+    # pin follows every retag; a pin with a code of its own is nested and
+    # shown twice ("-B17-B17:1", P26009 /13). Measured 2026-11-09.
     from api.actions import ops, copy_live
     h = ops._OPS_HELPERS
-    assert "static string NestedCodeOf(object o)" in h
-    assert 'if (NestedCodeOf(o) != "") continue;   // a pin inside a black box follows the box' in h
+    assert "static bool PinFollowBox(object o)" in h and "static List<object> PinsOfBox(object page, object box, HashSet<string> limitTo)" in h
+    assert 'GetWritable(o.GetType(), "Name").SetValue(o, want, null);' in h
+    macro = h[h.index("static void OpMacro"):h.index("static void OpUpdate")]
+    assert "foreach (object pn in PinsOfBox(page, o, own)) { try { PinFollowBox(pn); } catch { } following.Add(Handle(pn)); }" in macro
+    assert 'if (following.Contains(Handle(o))) { JObject a2 = (JObject)a.DeepClone(); a2.Remove("tag");' in macro
+    upd = h[h.index("static void OpUpdate"):h.index("static void OpMove")]
+    assert upd.index("PinsFollow(page, fn, null, r);") < upd.index("Finish(project, page, fn, a, r);")
+    assert 'if (B(a, "pinFollow", false)) r["pinFollow"] = PinFollowBox(fn);' in upd
+    sbox = h[h.index("static void OpStructureBox"):h.index("static void OpMacro")]
+    assert "foreach (object pn in PinsOfBox(page, o, null)) { try { if (PinFollowBox(pn)) followed++; } catch { } followers.Add(Handle(pn)); }" in sbox
+    assert "if (followers.Contains(Handle(o))) continue;" in sbox
     scripts = []
     monkeypatch.setattr(copy_live, "_execute_script",
                         lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}})
     copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename={"=ST2": "=ST3"})
     cs = scripts[-1]
     assert _string_literals_balanced(cs)
-    assert 'if (nn != n && nestedCode == "")' in cs and 'if (vn != "" && vnn != vn && nestedCode == "")' in cs
+    assert 'GetWritable(o.GetType(), "Name").SetValue(o, pn.Substring(c), null); pinsFollow++;' in cs
+    assert cs.index('results["pinsFollow"] = pinsFollow;') < cs.index('if (nn != n && nestedCode == "")')
+    assert 'if (pinFollowers.Contains(Handle(o))) { nestedCode = "pin"; d["follows"] = true; }' in cs
 
 
 def test_remove_op_locks_the_group_chain():
@@ -1488,3 +1499,22 @@ def test_page_description_on_create_and_setter(monkeypatch):
                         lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
     live.live_query_pages()
     assert 'PropText(pp0, "PAGE_NOMINATIOMN")' in scripts[-1]
+
+
+def test_update_parts_replace_remove_and_nested_follow(monkeypatch):
+    from api.actions import ops, copy_live
+    h = ops._OPS_HELPERS
+    assert "static void SetParts(object fn, JArray wanted, Dictionary<string, object> r)" in h
+    assert 'MethodInfo rm = fn.GetType().GetMethod("RemoveArticleReference");' in h
+    assert 'if (Has(a, "parts")) SetParts(fn, (JArray)a["parts"], r);' in h
+    assert 'if (Has(a, "removePart")) RemoveParts(fn, a["removePart"], r);' in h
+    assert 'if (Has(a, "tag") && fn.GetType().Name == "BoxedDevice" && B(a, "nestedFollow", true)) PinsFollow(page, fn, null, r);' in h
+    # no NameParts assignment on freshly inserted pins (that closed EPLAN)
+    assert "ClearOwnCode" not in h and "NestedFollow(" not in h
+    scripts = []
+    monkeypatch.setattr(copy_live, "_execute_script",
+                        lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}})
+    copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename={"=ST2": "=ST3"})
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "ownCodeCleared" not in cs

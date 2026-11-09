@@ -153,6 +153,31 @@ _COPY_BODY = '''
             List<string> cables = new List<string>();
             List<string> renameErrors = new List<string>();
             int renamed = 0, textsChanged = 0;
+            // 3a. the pins of the copied black boxes keep only ":n": the box
+            // supplies the DT and the pin follows its rename below (a pin
+            // with a code of its own is nested and shown twice: P26009 /13)
+            HashSet<string> pinFollowers = new HashSet<string>(); int pinsFollow = 0; List<string> pinErrors = new List<string>();
+            foreach (object bx in all)
+            {
+                if (bx == null || bx.GetType().Name != "BoxedDevice") continue;
+                double bxx0 = double.MaxValue, bxy0 = double.MaxValue, bxx1 = double.MinValue, bxy1 = double.MinValue;
+                try { foreach (object p in (IEnumerable)bx.GetType().GetMethod("GetBoundingBox", Type.EmptyTypes).Invoke(bx, null)) { double px = Convert.ToDouble(p.GetType().GetProperty("X").GetValue(p, null)), py = Convert.ToDouble(p.GetType().GetProperty("Y").GetValue(p, null)); bxx0 = Math.Min(bxx0, px); bxx1 = Math.Max(bxx1, px); bxy0 = Math.Min(bxy0, py); bxy1 = Math.Max(bxy1, py); } } catch { continue; }
+                foreach (object o in all)
+                {
+                    if (o == null || o.GetType().Name != "Function") continue;
+                    string pn = PropText(o, "Name") ?? ""; int c = pn.LastIndexOf(':'); if (c < 0) continue;
+                    object lo = TryRead(o, "Location", null); if (lo == null) continue;
+                    double ox = Convert.ToDouble(lo.GetType().GetProperty("X").GetValue(lo, null)), oy = Convert.ToDouble(lo.GetType().GetProperty("Y").GetValue(lo, null));
+                    if (ox < bxx0 - 0.01 || ox > bxx1 + 0.01 || oy < bxy0 - 0.01 || oy > bxy1 + 0.01) continue;
+                    pinFollowers.Add(Handle(o));
+                    object np = TryRead(o, "NameParts", null);
+                    string code = np == null ? "" : (PropText(np, "FUNC_CODE") ?? ""), nested = np == null ? "" : (PropText(np, "FUNC_NESTEDCODE") ?? "");
+                    if (code == "" && nested == "") continue;
+                    try { LockHard(o); GetWritable(o.GetType(), "Name").SetValue(o, pn.Substring(c), null); pinsFollow++; } catch (Exception pe) { pinErrors.Add(Handle(o) + ": " + Flatten(pe)); }
+                }
+            }
+            if (pinsFollow > 0) results["pinsFollow"] = pinsFollow;
+            if (pinErrors.Count > 0) results["pinErrors"] = pinErrors;
             foreach (object o in all)
             {
                 string tn = o.GetType().Name;
@@ -169,6 +194,7 @@ _COPY_BODY = '''
                     string nestedCode = "";
                     try { object np0 = TryRead(o, "NameParts", null); nestedCode = np0 == null ? "" : (PropText(np0, "FUNC_NESTEDCODE") ?? ""); } catch { }
                     if (nestedCode != "") d["nested"] = true;
+                    if (pinFollowers.Contains(Handle(o))) { nestedCode = "pin"; d["follows"] = true; }
                     try
                     {
                         if (nn != n && nestedCode == "") { LockHard(o); GetWritable(o.GetType(), "Name").SetValue(o, nn, null); d["newName"] = nn; renamed++; }
