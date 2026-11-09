@@ -1172,8 +1172,10 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         a new line never links to it), those points are removed and the line
         is placed again on the same wires: "replacedLine": True,
         "orphanPoints", "previousHandle" (the old handle is gone).
-        "unplacedConductors" lists conductors whose connection is no longer
-        placed (stale after rewiring through a new device); with
+        A source pin feeding two conductors (a stale logical connection left
+        by a rewiring) triggers one page rebuild of the connections
+        ("rebuiltFor"). "unplacedConductors" lists conductors whose
+        connection is no longer placed; with
         drop_unplaced=True they are removed ("droppedConductors") and the
         conductors read again.
     """
@@ -1306,6 +1308,26 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         # rewired through a new device: P26009 =MOV+CAMPO/13 kept the four
         # old B17 -> A30.4 conductors next to the four new ones) is stale.
         # Reported always; removed on request (drop_unplaced=True).
+        # The same device pin feeding two conductors means a stale logical
+        # connection survived a rewiring (P26009 /13: B17:1 -> A30.4:1 next
+        # to B17:1 -> X17:1 after a Y box was wired in). A page rebuild
+        # ("rebuild_all") drops it where a plain update does not.
+        if conductors and not replaced_line:
+            seen, dupes = set(), set()
+            for c in conductors:
+                src = c.get("source") or ""
+                if src and src in seen:
+                    dupes.add(src)
+                seen.add(src)
+            if dupes:
+                g = generate_connections(project_name=_target.get() or None, page_name=page, rebuild_all=True)
+                runs += 1
+                res["connectionsGenerated"] = runs
+                res["rebuiltFor"] = sorted(dupes)
+                if g.get("success"):
+                    conductors = _read()
+                else:
+                    res["rebuildError"] = g.get("error") or g.get("eplanMessages")
         unplaced = [c for c in conductors if c.get("placed") is False]
         if unplaced:
             res["unplacedConductors"] = [{"handle": c.get("handle"), "source": c.get("source"), "target": c.get("target"),

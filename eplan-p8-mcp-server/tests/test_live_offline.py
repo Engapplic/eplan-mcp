@@ -1419,7 +1419,7 @@ def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
                         lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
                             "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 2,
                             "conductors": [{"handle": "1/18/1/0", "placed": True, "source": "a", "target": "b"},
-                                           {"handle": "1/18/2/0", "placed": False, "source": "a", "target": "old"}],
+                                           {"handle": "1/18/2/0", "placed": False, "source": "c", "target": "old"}],
                             "crossed": [{"assigned": "now"}]}})
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
     monkeypatch.setattr(cables_live, "live_cables",
@@ -1430,7 +1430,7 @@ def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
                         lambda page, handles, allow, timeout: dropped.append(handles) or {"success": True, "removed": len(handles)})
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
     res = r["results"]
-    assert res["unplacedConductors"] == [{"handle": "1/18/2/0", "source": "a", "target": "old", "colour": None}]
+    assert res["unplacedConductors"] == [{"handle": "1/18/2/0", "source": "c", "target": "old", "colour": None}]
     assert dropped == [] and "droppedConductors" not in res and len(res["conductors"]) == 2
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False,
                                                   drop_unplaced=True)
@@ -1444,3 +1444,23 @@ def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
     assert 'new string[] { "1/18/2/0" }' in cs and 'errors.Add(Handle(cn) + ": still placed, not removed"); continue;' in cs
     # the conductor readers carry handle + placed
     assert 'cd["handle"] = Handle(c);' in cables_live._CABLE_DICT and 'cd["placed"] = (bool)ip;' in cables_live._HELPERS_CABLE
+
+
+def test_assign_rebuilds_connections_when_a_pin_feeds_two_conductors(monkeypatch):
+    # a stale logical connection after rewiring: B17:1 -> A30.4:1 next to
+    # B17:1 -> X17:1 (P26009 /13); only a rebuild_all drops it
+    from api.actions import cables_live, generate
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 2,
+                            "conductors": [{"handle": "1", "placed": True, "source": "=B17:1", "target": "=A30:1"},
+                                           {"handle": "2", "placed": True, "source": "=B17:1", "target": "=X17:1"}],
+                            "crossed": [{"assigned": "now"}]}})
+    calls = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: calls.append(kw) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"handle": "2", "placed": True, "source": "=B17:1", "target": "=X17:1"}]}]}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    res = r["results"]
+    assert res["rebuiltFor"] == ["=B17:1"] and any(kw.get("rebuild_all") for kw in calls) and len(res["conductors"]) == 1
+    assert res["connectionsGenerated"] == 3
