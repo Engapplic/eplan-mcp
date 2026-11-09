@@ -71,7 +71,11 @@ def live_copy_pages_to_structure(pages: list, target_plants: list,
 
     Returns:
         {"success", "copies": [{"source", "plant", "newPage", "retagged",
-        "kept": [...], "errors": [...]}], "pagesCreated": [...], "failed"}.
+        "kept": [...], "errors": [...], "structureBoxes"?, "warning"?}],
+        "pagesCreated": [...], "failed", "warnings"?}. A page with
+        structure boxes gets a "warning": the devices inside the boxes take
+        the box's =/+ and keep the source's names on the copy (duplicated
+        devices) until the boxes are renamed.
         Sub-pages (/2.a) keep their sub-counter on the copy (=ST2+CE/2.a).
     """
     try:
@@ -141,6 +145,23 @@ def live_copy_pages_to_structure(pages: list, target_plants: list,
                         c["newPage"] = newName; created.Add(newName);
 
                         int n = 0;
+                        // Structure boxes on the copy re-impose THEIR =/+ on the
+                        // devices inside: a device renamed "=TST+CAMPO-MB01.1"
+                        // inside a copied "=ST1+CAMPO" box goes back to
+                        // "=ST1+CAMPO-MB01.1" - the same device as on the source
+                        // page, cross references mixed (P26009 =TST+CAMPO/10,
+                        // 2026-11-09: 137 "retagged", none actually renamed).
+                        List<string> boxes = new List<string>();
+                        foreach (object pl in PagePlacements(np))
+                            if (pl != null && pl.GetType().Name == "LocationBox") { string bn = PropText(pl, "Name") ?? ""; if (!boxes.Contains(bn)) boxes.Add(bn); }
+                        if (boxes.Count > 0)
+                        {
+                            c["structureBoxes"] = boxes;
+                            c["warning"] = "The page has structure boxes (" + string.Join(", ", boxes.ToArray()) + "): the devices inside take the BOX's =/+, " +
+                                "so on the copy they keep the source's names and become the SAME devices as on the source page. " +
+                                "Rename the boxes on the copy (eplan_live_batch update on each LocationBox, or copy_region with rename) " +
+                                "or remove the copy.";
+                        }
                         if (retag)
                         {
                             try { MethodInfo l0 = MethodByShape(np.GetType(), "LockObject", new string[] { }, false); if (l0 != null) l0.Invoke(np, null); } catch { }
@@ -185,8 +206,15 @@ def live_copy_pages_to_structure(pages: list, target_plants: list,
             results["failed"] = failed;
             results["success"] = failed == 0;
 '''
-    return _execute_script(
+    r = _execute_script(
         live._script("LiveCopyPages_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC),
         timeout=timeout_seconds,
     )
+    res = r.get("results") if isinstance(r.get("results"), dict) else None
+    if isinstance(res, dict):
+        warns = ["%s -> %s: %s" % (c.get("source"), c.get("newPage"), c["warning"])
+                 for c in res.get("copies") or [] if isinstance(c, dict) and c.get("warning")]
+        if warns:
+            res["warnings"] = warns
+    return r

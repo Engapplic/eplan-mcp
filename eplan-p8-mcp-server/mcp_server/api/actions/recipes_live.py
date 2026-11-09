@@ -273,7 +273,7 @@ def _remove_stray_points(page, allow_real_project, timeout_seconds):
 def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: float = 48.0,
                                 reassign: bool = True, labels: bool = True, layers: bool = True,
                                 verbose: bool = False, allow_real_project: bool = False,
-                                timeout_seconds: float = 600.0) -> dict:
+                                timeout_seconds: float = 180.0) -> dict:
     """
     Rework a sensor page to plugged hoses in ONE call. WRITES - scratch-only
     by default.
@@ -307,7 +307,11 @@ def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: fl
         reassign, labels, layers: Steps 4, 5 and 6 (default all True).
         verbose: Add the planned ops and every step's result.
         allow_real_project: Must be True to write outside the scratch root.
-        timeout_seconds: For each script (default 600).
+        timeout_seconds: For each script (default 180; a step takes a few
+            seconds). When a script gets no answer, or another session holds
+            EPLAN past the lock timeout, the recipe STOPS: the remaining steps
+            are not sent to a hung EPLAN ("aborted" names the step; P26009
+            2026-11-09: a hang made one run wait 1456 s, 600 s per step).
 
     Returns:
         A SUMMARY: {"success", "page", "dryRun", "planned": {retag, symbols,
@@ -342,18 +346,58 @@ def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: fl
         return out
 
     steps = {}
+    clock = [time.time()]
+
+    class _Abort(Exception):
+        pass
 
     def step(name, res, ok=None):
         res = res if isinstance(res, dict) else {}
         r = R(res) if isinstance(res.get("results"), dict) else res
         e = r.get("errors") or ([r.get("error")] if r.get("error") else [])
-        steps[name] = {"ok": bool(r.get("success")) if ok is None else ok, "failed": r.get("failed", 0 if not e else len(e))}
+        steps[name] = {"ok": bool(r.get("success")) if ok is None else ok, "failed": r.get("failed", 0 if not e else len(e)),
+                       "seconds": round(time.time() - clock[0], 1)}
+        clock[0] = time.time()
         if e:
             steps[name]["errors"] = e[:8]
         if verbose:
             steps[name]["result"] = r
+        if _dead(res) or _dead(r):
+            out["aborted"] = name
+            raise _Abort()
         return r
 
+    try:
+        _run_steps(locals(), step)
+    except _Abort:
+        out["steps"] = steps
+        out["success"] = False
+        out["error"] = ("EPLAN stopped answering during step %r: the rest of the recipe was not sent. "
+                        "Check eplan_ping; once EPLAN answers again, run the recipe again - it skips what is done."
+                        % out["aborted"])
+        out["seconds"] = round(time.time() - t0, 1)
+        return out
+    return _finish(out, steps, plan, page, timeout_seconds, t0)
+
+
+def _dead(r):
+    """A result that says EPLAN did not answer (no result file, timeout) or
+    another session held it past the lock timeout."""
+    if not isinstance(r, dict):
+        return False
+    et = r.get("errorType") or ""
+    if et in ("McpScriptNoResult", "EplanBusy", "McpOpsTimeout"):
+        return True
+    msg = str(r.get("error") or r.get("message") or "")
+    return "no result file appeared" in msg or "did not answer" in msg
+
+
+def _run_steps(env, step):
+    def R(r):
+        return r.get("results") if isinstance(r.get("results"), dict) else r
+    page, plan = env["page"], env["plan"]
+    allow_real_project, timeout_seconds = env["allow_real_project"], env["timeout_seconds"]
+    reassign, labels, layers, steps, out = env["reassign"], env["labels"], env["layers"], env["steps"], env["out"]
     edit_ops = plan["retag"] + plan["symbols"] + plan["terminals"]
     if edit_ops:
         step("symbols", summarize_batch(run_ops(page, edit_ops, stop_on_error=False,
@@ -365,7 +409,7 @@ def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: fl
                                               timeout_seconds=timeout_seconds)))
     from .generate import generate_connections
     g = generate_connections(project_name=target.get() or None, page_name=page, rebuild_all=True)
-    steps["rebuild"] = {"ok": bool(g.get("success"))}
+    step("rebuild", g, ok=bool(g.get("success")))
 
     found = None
     if reassign and plan["cables"]:
@@ -373,8 +417,11 @@ def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: fl
         a = R(live_assign_cable_connections(page, "all", reassign_from_part=True, crossing_texts=False,
                                             allow_real_project=allow_real_project,
                                             timeout_seconds=timeout_seconds))
-        step("reassign", a)
         found = sum(int(c.get("conductors") or 0) for c in a.get("cables") or [])
+        out["_found"] = found
+        if any("no result file appeared" in str(c.get("error") or "") for c in a.get("cables") or []):
+            a = dict(a); a["errorType"] = "McpScriptNoResult"
+        step("reassign", a)
     if plan["cables"]:
         st = step("strayPoints", _remove_stray_points(page, allow_real_project, timeout_seconds))
         steps["strayPoints"]["removed"] = st.get("removed", 0)
@@ -392,6 +439,11 @@ def live_apply_connector_recipe(page: str, dry_run: bool = False, port_pitch: fl
         steps["layers"]["changed"] = len(st.get("changed") or [])
         steps["layers"]["noPoint"] = len(st.get("noPoint") or [])
 
+
+def _finish(out, steps, plan, page, timeout_seconds, t0):
+    def R(r):
+        return r.get("results") if isinstance(r.get("results"), dict) else r
+    found = out.pop("_found", None)
     after = R(schematic.live_read_page(page, include_pins=False, limit=5000, types=["Plug"],
                                        timeout_seconds=timeout_seconds))
     conns = R(schematic.live_read_connections(page, summary=True, timeout_seconds=timeout_seconds))
