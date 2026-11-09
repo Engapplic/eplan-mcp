@@ -1529,3 +1529,12 @@ def test_pin_follow_keeps_full_designation_and_covers_terminals():
     assert "if (pl == null || Handle(pl) == me || !IsBoxPinType(pl)) continue;" in h
     # house style is the default for the crossing texts
     assert cables_live.CROSSING_STYLE == {"rotation": 0.0, "height": 1.8, "docked": True, "section": False, "section_height": 1.3}
+
+
+def test_update_op_swaps_the_symbol_in_place():
+    from api.actions import ops
+    h = ops._OPS_HELPERS
+    upd = h[h.index("static void OpUpdate"):h.index("static void OpMove")]
+    assert 'if (Has(a, "symbol") && a["symbol"].Type == JTokenType.Object)' in upd
+    assert 'MethodByShape(fn.GetType(), "SetSymbolVariant", new string[] { "SymbolVariant", "Boolean" }, false);' in upd
+    assert 'B(sy, "useLogicalDefinition", false)' in upd and 'r["symbolBefore"]' in upd
