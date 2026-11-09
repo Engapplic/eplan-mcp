@@ -387,6 +387,7 @@ from .cables_live import (
     live_decorate_cable_crossings,
     live_set_conductor_colours,
     live_clean_cable_points,
+    live_set_connection_layers,
 )
 
 from .project_live import (
@@ -568,7 +569,7 @@ __all__ = [
     'live_report_types', 'live_create_report',
     'live_copy_pages_to_structure',
     'live_copy_region',
-    'live_clean_cable_points',
+    'live_clean_cable_points', 'live_set_connection_layers',
     'live_place_strand',
     'live_panel_captions', 'live_set_panel_captions',
     'live_property_texts', 'live_set_property_texts',
