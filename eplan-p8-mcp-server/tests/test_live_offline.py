@@ -752,7 +752,7 @@ def test_assign_cable_connections_inline_chain_skips_python_loop(monkeypatch):
     pins = []
     monkeypatch.setattr(cables_live, "live_set_conductor_colours",
                         lambda page, cable, **kw: pins.append(kw) or {"results": {"success": True, "skipped": "x"}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", reassign_from_part=True, crossing_texts=False, pin_colours="sensor", timeout_seconds=180)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", reassign_from_part=True, crossing_texts=False, pin_colours="sensor", timeout_seconds=180, brief=False)
     assert len(scripts) == 1 and gens == [] and reads == []
     res = r["results"]
     assert res["connectionsGenerated"] == 3 and res["conductors"][0]["colour"] == "BN" and res["lockedPoints"] == 3
@@ -769,7 +769,7 @@ def test_place_cable_definition_applies_scheme_after_assign(monkeypatch):
     monkeypatch.setattr(captions_live, "live_set_property_texts",
                         lambda page, ref, **kw: calls.append(("texts", page, ref, kw)) or {"results": {"success": True, "scheme": kw.get("scheme")}})
     r = cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, part="FES.541348",
-                                                scheme="Festo", show=["31004"])
+                                                scheme="Festo", show=["31004"], brief=False)
     assert [c[0] for c in calls] == ["assign", "texts"]
     assert calls[0][1]["reassign_from_part"] is True
     assert calls[1][1] == "+CE/2" and calls[1][2] == "h1"
@@ -777,7 +777,7 @@ def test_place_cable_definition_applies_scheme_after_assign(monkeypatch):
     assert r["results"]["propertyTexts"]["scheme"] == "Festo"
     # no scheme / show: the texts tool is not called
     calls.clear()
-    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, generate=False)
+    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, generate=False, brief=False)
     assert calls == []
 
 
@@ -817,10 +817,10 @@ def test_decorate_cable_crossings_script_and_passthrough(monkeypatch):
                         lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "201"}]}]}})
     monkeypatch.setattr(cables_live, "live_decorate_cable_crossings",
                         lambda page, cable, **kw: calls.append((page, cable)) or {"results": {"success": True, "crossingPoints": []}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, brief=False)
     assert calls == [("+CE/2", "h")] and r["results"]["crossings"]["success"] is True
     calls.clear()
-    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False)
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, crossing_texts=False, brief=False)
     assert calls == []
 
 
@@ -862,11 +862,11 @@ def test_decorate_style_and_pin_colours_passthrough(monkeypatch):
     monkeypatch.setattr(cables_live, "live_decorate_cable_crossings",
                         lambda page, cable, **kw: calls.append(("decor", kw.get("style"))) or {"results": {"success": True}})
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True,
-                                                  crossing_style={"rotation": 0}, pin_colours={"1": "BN"})
+                                                  crossing_style={"rotation": 0}, pin_colours={"1": "BN"}, brief=False)
     assert calls == [("pins", {"1": "BN"}), ("decor", {"rotation": 0})]
     assert r["results"]["pinColours"]["success"] is True
     calls.clear()
-    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False)
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, brief=False)
     assert calls == [("decor", None)], "no reassign from part: nothing to pair with pins"
 
 
@@ -994,7 +994,7 @@ def test_place_cable_removes_orphan_points_before_the_line(monkeypatch):
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
     monkeypatch.setattr(cables_live, "live_assign_cable_connections",
                         lambda page, cable, **kw: {"results": {"success": True, "crossed": [], "conductors": []}})
-    r = cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, part="FES.541348")
+    r = cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, part="FES.541348", brief=False)
     orphan, create = scripts
     assert _string_literals_balanced(orphan) and "LiveCableOrphans_" in orphan
     assert "double sx1 = 70.0, sy1 = 110.0, sx2 = 220.0, sy2 = 110.0;" in orphan
@@ -1005,7 +1005,7 @@ def test_place_cable_removes_orphan_points_before_the_line(monkeypatch):
     assert r["results"]["orphanPoints"][0]["handle"] == "p1"
     # generate=False places the bare line and looks at nothing
     scripts.clear(); gens.clear(); answers[0] = answers[1]
-    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, generate=False)
+    cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 110, 220, 110, generate=False, brief=False)
     assert len(scripts) == 1 and "LiveCableDef_" in scripts[0] and gens == []
 
 
@@ -1042,7 +1042,7 @@ def test_assign_replaces_a_stale_line_when_nothing_links(monkeypatch):
         return orig_assign(page, cable, **kw)
     monkeypatch.setattr(cables_live, "live_assign_cable_connections", assign_spy)
     r = assign_spy("+CE/2", "-W1", reassign_from_part=True, pin_colours="sensor",
-                   crossing_style={"rotation": 0}, extra_points="remove")
+                   crossing_style={"rotation": 0}, extra_points="remove", brief=False)
     res = r["results"]
     assert res["replacedLine"] is True and res["previousHandle"] == "h" and len(res["orphanPoints"]) == 3 and res["removedPoints"] == 2
     assert len(recreated) == 1 and len(gens) == 4   # three updates, then one after the points went
@@ -1055,7 +1055,7 @@ def test_assign_replaces_a_stale_line_when_nothing_links(monkeypatch):
     assert kw["pin_colours"] == "sensor" and kw["crossing_style"] == {"rotation": 0} and kw["extra_points"] == "remove"
     # the clone's own assignment never replaces again
     recreated.clear()
-    r = orig_assign("+CE/2", "-W1", replaced_line=True)
+    r = orig_assign("+CE/2", "-W1", replaced_line=True, brief=False)
     assert recreated == [] and r["results"]["conductors"] == []
 
 
@@ -1073,12 +1073,12 @@ def test_assign_updates_once_when_the_line_crosses_nothing_yet(monkeypatch):
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(1) or {"success": True})
     monkeypatch.setattr(cables_live, "live_cables",
                         lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "1"}]}]}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", crossing_texts=False)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", crossing_texts=False, brief=False)
     assert r["results"]["generatedFirst"] is True and len(runs) == 2 and len(gens) == 2
     assert r["results"]["conductors"] == [{"designation": "1"}]
     # generate=False never updates
     runs.clear(); gens.clear()
-    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False)
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False, brief=False)
     assert len(runs) == 1 and gens == []
 
 
@@ -1095,7 +1095,7 @@ def test_set_property_texts_batch_items_one_script(monkeypatch):
     r = captions_live.live_set_property_texts("+CAMPO/1", items=[
         {"ref": "-X01", "positions": {"20010": [60, 212]}, "hide": ["22002"]},
         {"ref": "-B3", "rotations": {"20011": 90}, "scheme": "Arriba a la izquierda, fuera 90"},
-    ])
+    ], verbose=True)
     assert len(scripts) == 1
     cs = scripts[0]
     assert _string_literals_balanced(cs)
@@ -1354,7 +1354,7 @@ def test_assign_reads_again_before_replacing_the_line(monkeypatch):
     called = []
     monkeypatch.setattr(cables_live, "_orphan_points", lambda *a, **k: called.append("orphans") or {"success": True, "orphanPoints": []})
     monkeypatch.setattr(cables_live, "_recreate_line", lambda *a, **k: called.append("recreate") or {"success": False})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False, brief=False)
     res = r["results"]
     assert called == [] and res.get("freshRead") is True and len(res["conductors"]) == 2 and "replacedLine" not in res
 
@@ -1439,12 +1439,12 @@ def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
     real_drop = cables_live._drop_connections
     monkeypatch.setattr(cables_live, "_drop_connections",
                         lambda page, handles, allow, timeout: dropped.append(handles) or {"success": True, "removed": len(handles)})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False, brief=False)
     res = r["results"]
     assert res["unplacedConductors"] == [{"handle": "1/18/2/0", "source": "c", "target": "old", "colour": None}]
     assert dropped == [] and "droppedConductors" not in res and len(res["conductors"]) == 2
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False,
-                                                  drop_unplaced=True)
+                                                  drop_unplaced=True, brief=False)
     res = r["results"]
     assert dropped == [["1/18/2/0"]] and res["droppedConductors"] == 1 and len(res["conductors"]) == 1
     # the drop script itself: only unplaced connections of the given handles go
@@ -1471,7 +1471,7 @@ def test_assign_rebuilds_connections_when_a_pin_feeds_two_conductors(monkeypatch
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: calls.append(kw) or {"success": True})
     monkeypatch.setattr(cables_live, "live_cables",
                         lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"handle": "2", "placed": True, "source": "=B17:1", "target": "=X17:1"}]}]}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False, brief=False)
     res = r["results"]
     assert res["rebuiltFor"] == ["=B17:1"] and any(kw.get("rebuild_all") for kw in calls) and len(res["conductors"]) == 1
     assert res["connectionsGenerated"] == 3
@@ -1561,3 +1561,275 @@ def test_set_connection_layers_script(monkeypatch):
     assert "if (false && want == indLayer)" in scripts[-1]
     assert r["results"]["connectionsGenerated"] is True and gens[0]["page_name"] == "+CE/2"
     assert cables_live.live_set_connection_layers("+CE/2", cable_layer="x")["success"] is False
+
+
+def test_set_property_texts_summary_by_default(monkeypatch):
+    from api.actions import captions_live
+    monkeypatch.setattr(captions_live, "_execute_script", lambda s, timeout=0: {"success": True, "results": {
+        "project": "P", "success": False, "count": 2, "failed": 1, "items": [
+            {"ref": "-X01", "success": True, "handle": "h1", "after": [{"id": 1}] * 30,
+             "moves": [{"selector": "20036", "reached": False}]},
+            {"ref": "-X02", "success": False, "error": "No placement"}]}})
+    r = captions_live.live_set_property_texts("+CE/2", items=[{"ref": "-X01", "hide": ["1"]}, {"ref": "-X02", "hide": ["1"]}])
+    res = r["results"]
+    assert res == {"project": "P", "success": False, "count": 2, "failed": 1,
+                   "errors": [{"ref": "-X02", "error": "No placement"}],
+                   "unreached": [{"ref": "-X01", "selector": "20036"}]}
+
+
+# --- token-saving package (P26009, 2026-11-09) ------------------------------
+
+def _pl(t, h, name, x, y, sym=None, bb=None):
+    p = {"clrType": t, "handle": h, "name": name, "location": {"x": x, "y": y}}
+    if sym:
+        p["symbol"] = {"library": sym[0], "name": sym[1], "variantNr": sym[2]}
+    if bb:
+        p["boundingBox"] = [{"x": bb[0], "y": bb[1]}, {"x": bb[2], "y": bb[3]}]
+    return p
+
+
+def _fij10_column():
+    # one column of P26009 =FIJ+CAMPO/10 as it was before the rework
+    return [
+        _pl("BoxedDevice", "b1", "=ST1+CAMPO-MB01.1", 22, 176, bb=(22, 154, 46, 176)),
+        _pl("Function", "p1", "=ST1+CAMPO-MB01.1:1", 24, 154, ("SPECIAL", "DCP", 2)),
+        _pl("Function", "p4", "=ST1+CAMPO-MB01.1:4", 32, 154, ("SPECIAL", "DCP", 2)),
+        _pl("Function", "p3", "=ST1+CAMPO-MB01.1:3", 40, 154, ("SPECIAL", "DCP", 2)),
+        _pl("Cable", "w1", "=ST1+CAMPO-W01.1", 23, 84, bb=(23, 83, 41, 85)),
+        _pl("BoxedDevice", "y", "=ST1+CAMPO-X01", 22, 76, bb=(22, 58, 70, 76)),
+        _pl("Function", "y11", "=+:X1:1", 24, 73, ("SPECIAL", "DCP", 0)),
+        _pl("Function", "y31", "=+:X3:1", 24, 60, ("SPECIAL", "DCP", 2)),
+        _pl("BoxedDevice", "a", "=MOV+CAMPO-A20.1", 16, 56, bb=(16, 40, 400, 56)),
+        _pl("Terminal", "t01", "=+:1", 24, 52, ("SPECIAL", "PLCCPPO", 0)),
+        _pl("Terminal", "t02", "=+:2", 32, 52, ("SPECIAL", "PLCCPPO", 0)),
+        _pl("Terminal", "t11", "=+:1", 72, 52, ("SPECIAL", "PLCCPPO", 0)),
+        _pl("Text", "x", None, 24, 48),
+    ]
+
+
+def test_connector_recipe_plan_matches_the_hand_made_ops():
+    from api.actions import recipes_live
+    plan = recipes_live.plan_connector_recipe(_fij10_column())
+    assert sorted(o["ref"] for o in plan["retag"]) == ["a", "b1", "y"]
+    sym = {o["ref"]: o["symbol"] for o in plan["symbols"]}
+    assert sym["p1"] == {"library": "SPECIAL", "symbol": "DCPM", "variant": 2}
+    assert sym["y11"] == {"library": "SPECIAL", "symbol": "DCPFEM", "variant": 0}
+    assert sym["y31"] == {"library": "SPECIAL", "symbol": "DCPM", "variant": 2}
+    terms = {o["ref"]: o for o in plan["terminals"]}
+    assert terms["t01"]["properties"] == {"FUNC_CONNECTIONDESIGNATION[1]": "XI0:1"}
+    assert terms["t02"]["properties"] == {"FUNC_CONNECTIONDESIGNATION[1]": "XI0:2"}
+    assert terms["t11"]["properties"] == {"FUNC_CONNECTIONDESIGNATION[1]": "XI1:1"}
+    assert terms["t11"]["symbol"]["symbol"] == "PLCCPPFEM"
+    plugs = plan["plugs"]
+    assert len(plugs) == 6 and len(plan["sensorPins"]) == 3
+    xd1 = [o for o in plugs if o["symbol"] == "XBD2" and o["x"] == 24][0]
+    xd2 = [o for o in plugs if o["symbol"] == "XSD2" and o["x"] == 24][0]
+    assert (xd1["y"], xd1["tag"], xd1["properties"]) == (145, "=ST1+CAMPO-W01.1", {"FUNC_CONNECTIONDESIGNATION[1]": "XD1:1"})
+    assert (xd2["y"], xd2["properties"]) == (82, {"FUNC_CONNECTIONDESIGNATION[1]": "XD2:1"})
+    assert xd1["variant"] == 2 and xd1["library"] == "IEC_symbol" and xd1["allowMerge"] is True
+    lab = {o["ref"]: o for o in plan["labels"]}
+    assert lab["y11"] == {"ref": "y11", "justifications": {"20036": "TopCenter"}, "positions": {"20036": [21.74, 71.5]}}
+    assert lab["y31"] == {"ref": "y31", "justifications": {"20036": "BottomCenter"}, "positions": {"20036": [25.3, 62.8]}}
+    assert plan["warnings"] == [] and plan["cables"] == ["w1"]
+
+
+def test_connector_recipe_plan_is_idempotent_and_warns():
+    from api.actions import recipes_live
+    done = [
+        _pl("BoxedDevice", "b1", "=ST1+CAMPO-MB01.1", 22, 176, bb=(22, 154, 46, 176)),
+        _pl("Function", "p1", "=+:1", 24, 154, ("SPECIAL", "DCPM", 2)),
+        _pl("Cable", "w1", "=ST1+CAMPO-W01.1", 23, 84, bb=(23, 83, 41, 85)),
+        _pl("Plug", "x1", "=ST1+CAMPO-W01.1", 24, 145),
+        _pl("Plug", "x2", "=ST1+CAMPO-W01.1", 24, 82),
+        _pl("BoxedDevice", "a", "=MOV+CAMPO-A20.1", 16, 56, bb=(16, 40, 400, 56)),
+        _pl("Terminal", "t01", "=+:XI0:1", 24, 52, ("SPECIAL", "PLCCPPFEM", 0)),
+    ]
+    plan = recipes_live.plan_connector_recipe(done)
+    assert plan["symbols"] == [] and plan["plugs"] == [] and plan["terminals"] == []
+    assert plan["skipped"] == {"symbols": 1, "terminals": 1, "plugs": 2}
+    # a sensor pin no cable crosses, and a sensor on the wrong cable number
+    odd = [
+        _pl("BoxedDevice", "b2", "=ST1+CAMPO-MB02.1", 60, 176, bb=(60, 154, 84, 176)),
+        _pl("Function", "q1", "=ST1+CAMPO-MB02.1:1", 62, 154, ("SPECIAL", "DCP", 2)),
+        _pl("BoxedDevice", "b3", "=ST1+CAMPO-MB03.1", 100, 176, bb=(100, 154, 124, 176)),
+        _pl("Function", "r1", "=ST1+CAMPO-MB03.1:1", 102, 154, ("SPECIAL", "DCP", 2)),
+        _pl("Cable", "w9", "=ST1+CAMPO-W09.1", 101, 84, bb=(101, 83, 119, 85)),
+    ]
+    plan = recipes_live.plan_connector_recipe(odd)
+    assert any("crossed by 0 cable" in w for w in plan["warnings"])
+    assert any("numbers differ" in w for w in plan["warnings"])
+    assert len(plan["plugs"]) == 2
+
+
+def test_connector_recipe_dry_run_and_run(monkeypatch):
+    from api.actions import recipes_live, schematic, generate, cables_live, captions_live
+    page = {"success": True, "placements": _fij10_column()}
+    reads = []
+    def fake_read(pg, **kw):
+        reads.append(kw.get("types"))
+        if kw.get("types") == ["Plug"]:
+            return {"success": True, "placements": [{"clrType": "Plug"}] * 6}
+        return page
+    monkeypatch.setattr(schematic, "live_read_page", fake_read)
+    monkeypatch.setattr(schematic, "live_read_connections",
+                        lambda pg, **kw: {"success": True, "byKind": {"Cable": 3, "IndividualConnection": 6}})
+    batches = []
+    monkeypatch.setattr(recipes_live, "run_ops", lambda pg, ops_, **kw: batches.append(ops_) or {
+        "success": True, "ops": [{"index": i, "op": o["op"], "success": True} for i, o in enumerate(ops_)], "failed": 0})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True, "kw": kw})
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections", lambda pg, cable, **kw: {
+        "success": True, "cables": [{"name": "=ST1+CAMPO-W01.1", "conductors": 3}], "count": 1, "failed": 0})
+    monkeypatch.setattr(captions_live, "live_set_property_texts", lambda pg, **kw: {"success": True, "results": {"success": True, "count": 2, "failed": 0, "errors": []}})
+    monkeypatch.setattr(cables_live, "live_set_connection_layers", lambda pg, **kw: {"success": True, "results": {"success": True, "changed": [], "noPoint": []}})
+    monkeypatch.setattr(recipes_live, "_remove_stray_points", lambda pg, a, t: {"success": True, "results": {"success": True, "removed": 0, "errors": []}})
+    dry = recipes_live.live_apply_connector_recipe("=FIJ+CAMPO/10", dry_run=True)
+    assert dry["dryRun"] and batches == [] and dry["planned"]["plugs"] == 6 and "steps" not in dry
+    out = recipes_live.live_apply_connector_recipe("=FIJ+CAMPO/10")
+    assert out["success"] is True, out
+    assert out["plugs"] == {"expected": 6, "found": 6} and out["conductors"] == {"expected": 3, "found": 3}
+    assert out["connections"] == {"Cable": 3, "IndividualConnection": 6}
+    assert set(out["steps"]) == {"symbols", "plugs", "rebuild", "reassign", "strayPoints", "labels", "layers"}
+    assert len(batches) == 2 and batches[1][0]["op"] == "place"
+    assert "plan" not in out and len(str(out)) < 2000, "a summary, not an echo"
+
+
+def test_assign_all_cables_of_a_page(monkeypatch):
+    from api.actions import cables_live, schematic
+    monkeypatch.setattr(schematic, "live_read_page", lambda pg, **kw: {"success": True, "placements": [
+        {"clrType": "Cable", "handle": "c1", "name": "=+-W1"}, {"clrType": "Cable", "handle": "c2", "name": "=+-W2"}]})
+    real = cables_live.live_assign_cable_connections
+    calls = []
+    def fake(pg, cable, **kw):
+        if cable == "all":
+            return real(pg, cable, **kw)
+        calls.append((cable, kw.get("crossing_texts")))
+        if cable == "c2":
+            return {"success": True, "results": {"success": False, "error": "boom", "conductors": []}}
+        return {"success": True, "results": {"success": True, "handle": "c1", "conductors": [{"colour": "BN"}, {"colour": "BU"}]}}
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections", fake)
+    out = cables_live.live_assign_cable_connections("+CE/2", "all", crossing_texts=False)
+    assert calls == [("c1", False), ("c2", False)]
+    assert out["count"] == 2 and out["failed"] == 1 and out["success"] is False
+    assert out["cables"][0] == {"name": "=+-W1", "handle": "c1", "conductors": 2, "colours": "BN/BU"}
+    assert out["cables"][1]["error"] == "boom"
+
+
+def test_read_page_filters_region_regex_fields():
+    from api.actions import schematic
+    out = {"success": True, "truncated": False, "placements": [
+        {"handle": "a", "name": "=+-MB01.1", "location": {"x": 24, "y": 154}, "pins": [1, 2], "symbol": {"name": "DC"}},
+        {"handle": "b", "name": "=+-MB02.1", "location": {"x": 72, "y": 154}, "pins": [1]},
+        {"handle": "c", "name": None, "location": {"x": 25, "y": 150}}]}
+    schematic._filter_placements(out, schematic._region([20, 140, 30, 160]), None, ["name"], 10, True)
+    assert out["placements"] == [{"handle": "a", "name": "=+-MB01.1"}, {"handle": "c", "name": None}]
+    assert out["matched"] == 2 and out["returned"] == 2
+    out = {"success": True, "placements": [{"handle": "a", "name": "=+-MB01.1", "location": {"x": 1, "y": 1}},
+                                          {"handle": "b", "name": "=+-W01.1", "location": {"x": 1, "y": 1}}]}
+    import re as _re
+    schematic._filter_placements(out, None, _re.compile(r"-W\d"), None, 1, True)
+    assert [p["handle"] for p in out["placements"]] == ["b"]
+    assert schematic.live_read_page("p", region=[1, 2])["success"] is False
+    assert schematic.live_read_page("p", name_regex="(")["success"] is False
+
+
+def test_read_connections_filters_and_summary(monkeypatch):
+    from api.actions import schematic
+    conns = [
+        {"kindOfWire": "Cable", "from": {"device": "=+-W01.1:XD1", "location": {"x": 24, "y": 145}}, "to": {"device": "=+-W01.1:XD2", "location": {"x": 24, "y": 82}}},
+        {"kindOfWire": "IndividualConnection", "from": {"device": "=+-MB01.1:1", "location": {"x": 24, "y": 154}}, "to": {"device": "=+-W01.1:XD1", "location": {"x": 24, "y": 145}}},
+        {"kindOfWire": "IndividualConnection", "from": {"device": "=+-X01:X3:1", "location": {"x": 72, "y": 60}}, "to": {"device": "=+-A20.1:XI0:1", "location": {"x": 72, "y": 52}}}]
+    scripts = []
+    monkeypatch.setattr(schematic, "_execute_script", lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+        "success": True, "total": 3, "matched": 3, "returned": 3, "truncated": False, "connections": list(conns)}})
+    out = schematic.live_read_connections("+CE/2", device="w01.1")
+    assert out["filtered"] == 2 and out["byKind"] == {"Cable": 1, "IndividualConnection": 1}
+    assert "items.Count < 5000" in scripts[-1], "the filter sees the whole page"
+    out = schematic.live_read_connections("+CE/2", region=[60, 40, 80, 70], summary=True)
+    assert out["byKind"] == {"IndividualConnection": 1} and "connections" not in out
+    out = schematic.live_read_connections("+CE/2", kind="Cable")
+    assert len(out["connections"]) == 1
+
+
+def test_render_crop_cuts_page_mm(tmp_path, monkeypatch):
+    from PIL import Image
+    from api.actions import ops
+    img = Image.new("RGB", (4200, 2970), "white")
+    # a red mark at page (24, 150) mm: px (240, 1470)
+    for dx in range(-3, 4):
+        for dy in range(-3, 4):
+            img.putpixel((240 + dx, 1470 + dy), (255, 0, 0))
+    path = tmp_path / "page.png"; img.save(path)
+    monkeypatch.setattr(ops, "_page_size_mm", lambda page: (420.0, 297.0))
+    r = ops._crop_render(str(path), "p", [20, 140, 30, 160], width=500)
+    crop = Image.open(r["crop"])
+    assert r["pxPerMm"] == 10.0 and crop.size[0] == 500
+    small = Image.open(ops._crop_render(str(path), "p", [20, 140, 30, 160])["crop"])
+    assert small.size == (100, 200)
+    assert small.getpixel((40, 100))[:3] == (255, 0, 0), "page (24,150) lands at crop (40,100)"
+    assert ops.live_render_page("p", region=[1, 2, 3])["success"] is False
+
+
+def test_plug_pin_designation_and_stray_points_script(monkeypatch):
+    from api.actions import cables_live, recipes_live
+    h = cables_live._HELPERS_CABLE
+    assert 'if (l.StartsWith("XD") && k > 2 && k < l.Length - 1) return l.Substring(k + 1);' in h
+    assert 'if (pn.StartsWith("XD") && pn.IndexOf(\':\') > 2' in h
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script", lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    recipes_live._remove_stray_points("+CE/2", False, 60)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'if (Math.Abs(y - (double)ln[3]) > 0.3) stray = true;' in cs
+    assert 'if (pp != null && (PropText(pp, "CONNECTION_DESIGNATION") ?? "") != "") continue;' in cs
+
+
+def test_pin_colours_sync_points_when_conductor_already_right(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script", lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="sensor")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'bool already = (string)d["before"] == want;' in cs
+    assert '"already") : (written > 0 ? "set" : "failed");' in cs
+    assert 'if ((PropText(plp, "CONNECTION_WIRENUMBER") ?? "") == want) continue;' in cs
+    body = cs[cs.index("bool already"):cs.index("string json = Newtonsoft")]
+    assert 'd["result"] = "already"; rows.Add(d); continue;' not in body
+
+
+def test_cable_tools_answer_briefly_by_default(monkeypatch):
+    from api.actions import cables_live
+    full = {"success": True, "results": {"success": True, "handle": "h", "cable": "=+-W1",
+        "conductors": [{"designation": "", "colour": "BN", "crossSection": "0,25 mm2", "source": "a", "target": "b"},
+                       {"designation": "", "colour": "BK", "crossSection": "0,25 mm2", "source": "a", "target": "b"}],
+        "crossed": [{"x": 1}] * 2, "pinColours": {"success": True, "conductors": [{"result": "set"}, {"result": "already"}]},
+        "crossings": {"success": True, "crossingPoints": [{"x": 1}] * 2, "extraPoints": []},
+        "connectionsGenerated": 2, "reassignError": "boom"}}
+    seen = []
+    real = cables_live.live_assign_cable_connections
+    def fake(page, cable, **kw):
+        seen.append(kw.get("brief"))
+        if kw.get("brief") is False:
+            return full
+        return real(page, cable, **kw)
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections", fake)
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1")
+    assert seen == [None, False]
+    res = r["results"]
+    assert res["conductors"] == 2 and res["colours"] == "BN/BK" and res["crossSections"] == ["0,25 mm2"]
+    assert res["pinColours"] == {"set": 1, "already": 1} and res["crossings"] == {"points": 2, "extraPoints": 0}
+    assert res["errors"] == {"reassignError": "boom"} and res["crossed"] == 2
+    assert len(str(res)) < 400
+
+
+def test_parts_db_get_part_brief_drops_languages_and_links(monkeypatch):
+    from api.actions import scripted
+    monkeypatch.setattr(scripted, "_execute_script", lambda s, **k: {"success": True, "results": {"success": True, "found": True, "part": {
+        "PartNr": "FES.1", "Description1": "de_DE@Kabel;en_US@Cable;es_ES@Cable;fr_FR@Cable;",
+        "Properties": {"ARTICLE_NOTE": "de_DE@a;es_ES@b;ru_RU@c;", "ARTICLE_EXTERNAL_DOCUMENT_1": "http://x",
+                       "ARTICLE_CABLEWIRECOUNT": "5", "PART_CREATE": "EDP", "ARTICLE_EDP_CHECKSUM": "x"}}}})
+    part = scripted.parts_db_get_part("FES.1")["results"]["part"]
+    assert part["Description1"] == "en_US@Cable;es_ES@Cable;"
+    assert part["Properties"] == {"ARTICLE_NOTE": "es_ES@b;", "ARTICLE_CABLEWIRECOUNT": "5"}
+    full = scripted.parts_db_get_part("FES.1", brief=False)["results"]["part"]
+    assert "ARTICLE_EXTERNAL_DOCUMENT_1" in full["Properties"]

@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **255 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **256 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -52,7 +52,9 @@ It exposes **255 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile; every tool's JSON is compact, not pretty-printed, edit ops echo only handle / name / location / the values written (`brief`, default) and `eplan_live_remove_placement` is brief by default: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (update also takes `symbol`: {"library","symbol","variant"} swaps the placed symbol in place keeping DT, designation, PLC data and connections - an EX600's PLCCPPO terminals to PLCCPPFEM, a DCP pin to DCPM -, `parts` - the whole part list the device ends with, `part` only ADDS -, `removePart`, and a `tag` on a black box drags its pins along; the DCP pins of a black box keep only ":n" as their name - the box supplies the DT - in macro inserts, structure boxes, copy_region and retags, since a pin with a code of its own is shown twice, "-B17-B17:1"; `pinFollow` repairs one pin) (place / rect / macro / update /
+  batches skip the compile; every tool's JSON is compact, not pretty-printed, edit ops echo only handle / name / location / the values written (`brief`, default) and `eplan_live_remove_placement` is brief by default: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (answers with a SUMMARY by default - counts, errors, handles created -
+`verbose=True` for every op's echo; `operations_file` takes the ops from a
+JSON file instead of the conversation) (update also takes `symbol`: {"library","symbol","variant"} swaps the placed symbol in place keeping DT, designation, PLC data and connections - an EX600's PLCCPPO terminals to PLCCPPFEM, a DCP pin to DCPM -, `parts` - the whole part list the device ends with, `part` only ADDS -, `removePart`, and a `tag` on a black box drags its pins along; the DCP pins of a black box keep only ":n" as their name - the box supplies the DT - in macro inserts, structure boxes, copy_region and retags, since a pin with a code of its own is shown twice, "-B17-B17:1"; `pinFollow` repairs one pin) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
@@ -359,7 +361,13 @@ All of these exist as `eplan_*` tools:
   updates link nothing the line is stale: its orphan points are removed
   and the line is cloned through a one-object window macro on the same
   wires, full name / part / text arrangement kept - `replacedLine`, the
-  old handle is gone), `eplan_live_set_connection_layers` (uniform colours
+  old handle is gone), `eplan_live_assign_cable_connections` / `eplan_live_place_cable_definition` answer briefly by default (conductors as count + colours, what was repaired, errors; `brief=False` for the detail) and `eplan_parts_db_get_part` keeps only es_ES/en_US texts and drops document links unless `brief=False`, `eplan_live_apply_connector_recipe` (a sensor page reworked to plugged
+  hoses in ONE call - retag of the boxes, symbols in place, XBD2/XSD2
+  connectors tagged with the cable, rebuild, every cable reassigned,
+  the Y's designation texts, connection layers - answering with a
+  summary: planned / skipped / expected vs found / warnings; `dry_run`
+  only plans; running it twice changes nothing),
+`eplan_live_set_connection_layers` (uniform colours
   of the autoconnect lines of a page: the colour is the layer's pen, cable
   conductors on EPLAN311 - red -, plain wires on EPLAN510 - blue -, written
   on the connection definition points; a wire without a point is only

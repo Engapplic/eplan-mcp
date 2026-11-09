@@ -135,7 +135,21 @@ def test_a_failed_op_fails_the_batch_but_keeps_the_detail(one_shot):
     out = ops.live_batch("=+CE/0", [{"op": "update", "ref": "-K9", "tag": "-K1"}])
     assert out["success"] is False
     assert out["stoppedAt"] == 0
-    assert "No placement" in out["ops"][0]["error"]
+    assert "No placement" in out["errors"][0]["error"] and out["errors"][0]["index"] == 0
+    assert "ops" not in out, "the summary is the default answer"
+    full = ops.live_batch("=+CE/0", [{"op": "update", "ref": "-K9", "tag": "-K1"}], verbose=True)
+    assert "No placement" in full["ops"][0]["error"]
+
+
+def test_batch_reads_operations_file_and_summarizes(one_shot, tmp_path):
+    f = tmp_path / "ops.json"
+    f.write_text('{"operations": [{"op": "place", "library": "SPECIAL", "symbol": "X2_1", "x": 1, "y": 2, "label": "t"}]}', encoding="utf-8")
+    out = ops.live_batch("=+CE/0", operations_file=str(f))
+    assert one_shot["request"]["ops"][0]["symbol"] == "X2_1"
+    assert out["success"] is True and out["count"] == 1 and out["errors"] == []
+    assert out["created"] == [{"index": 0, "handle": "1/2/3/0"}]  # the canned op carries no label
+    assert ops.live_batch("=+CE/0", [{"op": "x"}], operations_file=str(f))["success"] is False
+    assert ops.live_batch("=+CE/0", operations_file=str(tmp_path / "nope.json"))["success"] is False
 
 
 def test_single_op_tools_lift_their_op(one_shot):

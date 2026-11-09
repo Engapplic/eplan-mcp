@@ -467,3 +467,53 @@ LLM:  [eplan_connect]         -> Connected on port 49152
 ```
 
 See [`../../llm.md`](../../llm.md) for an operating guide aimed at the connected LLM.
+
+
+## Saving tokens: summaries, files, filters, recipes
+
+A page reworked op by op costs the conversation more than EPLAN: hundreds of
+generated ops pasted in, hundreds of KB of echoes coming back. The live tools
+answer briefly by default and take their input from files:
+
+| Tool | Default answer | Detail on request |
+|---|---|---|
+| `eplan_live_batch` | `{success, count, failed, errors[{index, op, error}], created[{index, label, handle}], labels}` | `verbose=True` (every op's echo) |
+| `eplan_live_batch` input | `operations` | `operations_file` = path of a JSON list or `{"operations": [...]}` |
+| `eplan_live_set_property_texts` | `{success, count, failed, errors[{ref, error}], unreached[{ref, selector}]}` | `verbose=True` |
+| `eplan_live_read_page` | as before, plus filters `types=[...]`, `region=[x1,y1,x2,y2]` (location inside, page mm), `name_regex`, `fields=[...]` (handle always kept) | - |
+| `eplan_live_read_connections` | as before, plus `device` (tag substring, either end), `region`, `kind`, `summary=True` (only `byKind` counts) | - |
+| `eplan_live_assign_cable_connections` | `cable="all"`: every cable of the page, `{count, failed, cables[{name, conductors, colours, error?}]}` | per cable call |
+| `eplan_live_assign_cable_connections`, `eplan_live_place_cable_definition` | `{handle, conductors (n), colours, crossSections, pinColours {set, already}, crossings {points}, repairs, errors}` | `brief=False` |
+| `eplan_parts_db_get_part` | es_ES / en_US texts only, no document links or EDP fields | `brief=False` |
+| `eplan_live_render_page` | `region=[x1,y1,x2,y2]` cut on the server (`crop` path), `scale` or `width` | whole page in `files` |
+
+### Connector recipe (`eplan_live_apply_connector_recipe`)
+
+Validated on P26009 (FIJ/10-13, MOV/10-13). One call reworks a sensor page to
+plugged hoses; `dry_run=True` only plans. Every step skips what is already
+right, so a second run changes nothing.
+
+1. Every black box is retagged with its own tag: its pins keep only `:n`
+   and follow the box (a pin with a device code of its own is shown twice).
+2. Symbols in place (`update` with `symbol`): sensor pins `DCP -> DCPM` v2,
+   Y pins `X3` `DCP -> DCPM` v2, Y pins `X1`/`X2` `DCP -> DCPFEM` v0, EX600
+   terminals `PLCCPPO -> PLCCPPFEM` v0 with `FUNC_CONNECTIONDESIGNATION[1]` =
+   `XIk:n`, k = port = (x - first terminal x of the box) // 48.
+3. Every sensor pin crossed by a cable definition line gets the cable's
+   connectors: `IEC_symbol/XBD2` v2 at `(x, y_pin - 9)` designation `XD1:n`
+   and `IEC_symbol/XSD2` v2 at `(x, y_line - 2)` designation `XD2:n`, both
+   tagged with the cable's full name (`allowMerge`, no visible name).
+4. Connection update with `rebuild_all`, then every cable reassigned from
+   its part with `crossing_texts=False` (hand-placed colour texts stay).
+5. The Y's designation text (property 20036): X1/X2 `TopCenter` at
+   `(x - 2.26, y - 1.5)`, X3 `BottomCenter` at `(x + 1.3, y + 2.8)`, where
+   (x, y) is the pin's location and the position is the target
+   `set_property_texts` measures toward (the text box's top-left corner
+   with that justification).
+6. `eplan_live_set_connection_layers`: cable conductors on EPLAN311 (red),
+   plain wires on EPLAN510 (blue), stubs that kept the cable layer reset.
+
+Answer: `planned`, `skipped`, `sensorPins`, `cables`, `steps` (ok / failed /
+first errors), `plugs` and `conductors` expected vs found, `connections`
+by kind, `warnings` (a sensor pin crossed by no or several cables, a
+sensor whose number differs from its cable's, pins off the row).
