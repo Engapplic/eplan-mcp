@@ -1397,3 +1397,50 @@ def test_nested_functions_follow_their_box(monkeypatch):
     cs = scripts[-1]
     assert _string_literals_balanced(cs)
     assert 'if (nn != n && nestedCode == "")' in cs and 'if (vn != "" && vnn != vn && nestedCode == "")' in cs
+
+
+def test_remove_op_locks_the_group_chain():
+    # removing one object of an inserted macro threw LockingException on
+    # the macro's group (P26009 =MOV+CAMPO/13): the groups above are locked
+    from api.actions import ops
+    h = ops._OPS_HELPERS
+    assert "static void LockWithGroups(object o)" in h
+    assert 'object g = TryRead(t, "Group", null);' in h.split("static void LockWithGroups(object o)")[1].split("static void RemoveObject")[0]
+    assert "foreach (object o in targets) { LockWithGroups(o); RemoveObject(o); }" in h
+    assert "try { LockWithGroups(o); } catch { }" in h
+
+
+def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
+    # a conductor whose connection is no longer placed is stale (P26009 /13
+    # kept the old B17 -> A30.4 conductors after a Y box was wired in)
+    from api.actions import cables_live, generate
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 2,
+                            "conductors": [{"handle": "1/18/1/0", "placed": True, "source": "a", "target": "b"},
+                                           {"handle": "1/18/2/0", "placed": False, "source": "a", "target": "old"}],
+                            "crossed": [{"assigned": "now"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"handle": "1/18/1/0", "placed": True}]}]}})
+    dropped = []
+    real_drop = cables_live._drop_connections
+    monkeypatch.setattr(cables_live, "_drop_connections",
+                        lambda page, handles, allow, timeout: dropped.append(handles) or {"success": True, "removed": len(handles)})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    res = r["results"]
+    assert res["unplacedConductors"] == [{"handle": "1/18/2/0", "source": "a", "target": "old", "colour": None}]
+    assert dropped == [] and "droppedConductors" not in res and len(res["conductors"]) == 2
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False,
+                                                  drop_unplaced=True)
+    res = r["results"]
+    assert dropped == [["1/18/2/0"]] and res["droppedConductors"] == 1 and len(res["conductors"]) == 1
+    # the drop script itself: only unplaced connections of the given handles go
+    scripts.clear()
+    real_drop("+CE/2", ["1/18/2/0"], False, 60)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'new string[] { "1/18/2/0" }' in cs and 'errors.Add(Handle(cn) + ": still placed, not removed"); continue;' in cs
+    # the conductor readers carry handle + placed
+    assert 'cd["handle"] = Handle(c);' in cables_live._CABLE_DICT and 'cd["placed"] = (bool)ip;' in cables_live._HELPERS_CABLE

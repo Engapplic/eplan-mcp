@@ -72,6 +72,8 @@ _CABLE_DICT = '''
                     cd["target"] = s2 == null ? "" : (PropText(s2, "Name") ?? "");
                     object cpg = TryRead(c, "Page", null);
                     cd["page"] = cpg == null ? null : PropText(cpg, "Name");
+                    cd["handle"] = Handle(c);
+                    object ip = TryRead(c, "IsPlaced", null); if (ip != null) cd["placed"] = (bool)ip;
                     conductors.Add(cd);
                 }
                 d["conductors"] = conductors;
@@ -162,6 +164,8 @@ _HELPERS_CABLE = r'''
             cd["target"] = s2 == null ? "" : (PropText(s2, "Name") ?? "");
             object cpg = TryRead(c, "Page", null);
             cd["page"] = cpg == null ? null : PropText(cpg, "Name");
+            cd["handle"] = Handle(c);
+            object ip = TryRead(c, "IsPlaced", null); if (ip != null) cd["placed"] = (bool)ip;
             conductors.Add(cd);
         }
         return conductors;
@@ -346,6 +350,43 @@ def _recreate_line(page: str, handle: str, allow_real_project: bool, timeout_sec
             os.remove(macro_file)
     except OSError:
         pass
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    return res if isinstance(res, dict) else {"success": False, "error": str(res)}
+
+
+_DROP_BODY = '''
+            Type finderType = FindType("Eplan.EplApi.DataModel.DMObjectsFinder");
+            object finder = Activator.CreateInstance(finderType, new object[] { project });
+            Type cfT = FindType("Eplan.EplApi.DataModel.ConnectionsFilter");
+            object cf = Activator.CreateInstance(cfT);
+            MethodInfo gc = finderType.GetMethod("GetConnections", new Type[] { cfT });
+            HashSet<string> wanted = new HashSet<string>(new string[] { HANDLES });
+            int removed = 0; List<string> errors = new List<string>(); List<string> gone = new List<string>();
+            List<object> snap = new List<object>();
+            foreach (object cn in (IEnumerable)gc.Invoke(finder, new object[] { cf })) if (cn != null && wanted.Contains(Handle(cn))) snap.Add(cn);
+            foreach (object cn in snap)
+            {
+                object ip = TryRead(cn, "IsPlaced", null);
+                if (ip != null && (bool)ip) { errors.Add(Handle(cn) + ": still placed, not removed"); continue; }
+                try { LockHard(cn); cn.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(cn, null); removed++; gone.Add(Handle(cn)); }
+                catch (Exception e) { errors.Add(Handle(cn) + ": " + Flatten(e)); }
+            }
+            results["removed"] = removed; results["handles"] = gone; results["errors"] = errors; results["success"] = errors.Count == 0;
+'''
+
+
+def _drop_connections(page: str, handles, allow_real_project: bool, timeout_seconds: float) -> dict:
+    # Remove the (unplaced) connection objects with these handles - the stale
+    # conductors a rewired cable still lists (see live_assign_cable_connections).
+    if not handles:
+        return {"success": True, "removed": 0}
+    body = (_guard_prelude(allow_real_project)
+            + _DROP_BODY.replace("HANDLES", ", ".join('"%s"' % cs_escape(str(h)) for h in handles)))
+    r = _execute_script(
+        live._script("LiveCableDrop_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
     res = r.get("results") if isinstance(r.get("results"), dict) else r
     return res if isinstance(res, dict) else {"success": False, "error": str(res)}
 
@@ -1081,7 +1122,8 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                                   crossing_style: dict = None, pin_colours="auto",
                                   extra_points: str = "hide",
                                   allow_real_project: bool = False,
-                                  timeout_seconds: float = 180.0, replaced_line: bool = False) -> dict:
+                                  timeout_seconds: float = 180.0, replaced_line: bool = False,
+                                  drop_unplaced: bool = False) -> dict:
     """
     Make the connections a cable definition line crosses its conductors.
     WRITES - scratch-only by default.
@@ -1130,6 +1172,10 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         a new line never links to it), those points are removed and the line
         is placed again on the same wires: "replacedLine": True,
         "orphanPoints", "previousHandle" (the old handle is gone).
+        "unplacedConductors" lists conductors whose connection is no longer
+        placed (stale after rewiring through a new device); with
+        drop_unplaced=True they are removed ("droppedConductors") and the
+        conductors read again.
     """
     try:
         page = cs_text(page, "page")
@@ -1256,6 +1302,24 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             if g.get("success"):
                 conductors = _read()
         res["connectionsGenerated"] = runs
+        # A conductor whose connection is no longer placed (its wire was
+        # rewired through a new device: P26009 =MOV+CAMPO/13 kept the four
+        # old B17 -> A30.4 conductors next to the four new ones) is stale.
+        # Reported always; removed on request (drop_unplaced=True).
+        unplaced = [c for c in conductors if c.get("placed") is False]
+        if unplaced:
+            res["unplacedConductors"] = [{"handle": c.get("handle"), "source": c.get("source"), "target": c.get("target"),
+                                          "colour": c.get("colour")} for c in unplaced]
+            if drop_unplaced:
+                dr = _drop_connections(page, [c.get("handle") for c in unplaced if c.get("handle")],
+                                       allow_real_project, timeout_seconds)
+                res["droppedConductors"] = dr.get("removed")
+                if not dr.get("success", True):
+                    res["dropError"] = dr.get("error") or dr.get("errors")
+                generate_connections(project_name=_target.get() or None, page_name=page)
+                runs += 1
+                res["connectionsGenerated"] = runs
+                conductors = _read()
         res["conductors"] = conductors
         if pin_colours and conductors and reassign_from_part:
             pr = live_set_conductor_colours(page, res.get("handle") or cable, pin_colours=pin_colours,

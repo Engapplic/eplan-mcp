@@ -347,7 +347,10 @@ All of these exist as `eplan_*` tools:
   for a line placed by hand or moved: EPLAN does not assign conductors to
   an API-placed line on its own; a connection EPLAN linked to the line
   without writing the cable into it is assigned too, and pre-existing
-  connections are locked with retries before the write; when three
+  connections are locked with retries before the write; a conductor
+  whose connection is no longer placed (stale after rewiring through a new
+  device) is listed in `unplacedConductors` and removed with
+  `drop_unplaced=True`; when three
   updates link nothing the line is stale: its orphan points are removed
   and the line is cloned through a one-object window macro on the same
   wires, full name / part / text arrangement kept - `replacedLine`, the

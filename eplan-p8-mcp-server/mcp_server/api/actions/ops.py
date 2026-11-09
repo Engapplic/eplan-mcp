@@ -613,13 +613,33 @@ _OPS_HELPERS = r'''
         return objs;
     }
 
+    // Lock the object, everything under it and every group above it
+    // (LockObject + SmartLock). Removing one object of an inserted macro
+    // threw LockingException on the macro's GROUP (124/26/37157/0, P26009
+    // =MOV+CAMPO/13, 2026-11-09): the parent group must be locked too.
+    static void LockWithGroups(object o)
+    {
+        if (o == null) return;
+        LockDeep(o);
+        try { MethodInfo sm = o.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(o, null); } catch { }
+        object t = o;
+        for (int guard = 0; guard < 20; guard++)
+        {
+            object g = TryRead(t, "Group", null);
+            if (g == null || PropText(g, "IsValid") == "False") break;
+            try { Lock(g); } catch { }
+            try { MethodInfo sm = g.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(g, null); } catch { }
+            t = g;
+        }
+    }
+
     static void RemoveObject(object o)
     {
         if (o == null) return;
         if (PropText(o, "IsValid") == "False") return;
         // A locked Group removes itself with its contents (measured); only
         // if that fails are the sub-placements removed one by one.
-        try { Lock(o); } catch { }
+        try { LockWithGroups(o); } catch { }
         try
         {
             Call(RequireMethod(o.GetType(), "Remove", new string[] { }, false), o, new object[] { });
@@ -911,7 +931,8 @@ _OPS_HELPERS = r'''
         if (refs.Count == 0) throw new Exception("'ref' or 'refs' is required.");
         List<object> targets = new List<object>();
         foreach (string rf in refs) targets.Add(Resolve(page, rf, labels));
-        foreach (object o in targets) { Lock(o); RemoveObject(o); }
+        try { Lock(page); } catch { }
+        foreach (object o in targets) { LockWithGroups(o); RemoveObject(o); }
         r["removed"] = targets.Count;
     }
 
