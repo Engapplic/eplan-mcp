@@ -930,7 +930,7 @@ def test_set_property_texts_script_order(monkeypatch):
     # degrees in, radians to EPLAN; moves last
     assert "* Math.PI / 180.0" in cs
     assert cs.index('"Rotation"') < cs.index("measure-and-correct")
-    assert 'new string[] { "20010", "60.0", "212.0" }' in cs
+    assert 'new string[] { "20010", "60.0", "212.0", "TopLeft" }' in cs
     assert 'new string[] { "20011", "90.0" }' in cs
     assert 'new string[] { "20010", "BottomLeft" }' in cs
     assert "bool anyEdit = true;" in cs
@@ -1081,7 +1081,7 @@ def test_set_property_texts_batch_items_one_script(monkeypatch):
     assert _string_literals_balanced(cs)
     assert cs.count('ir["ref"] = ') == 2 and cs.count("catch (Exception ex) { ir[\"success\"] = false;") == 2
     assert 'FindPanelItems(page, "-X01")' in cs and 'FindPanelItems(page, "-B3")' in cs
-    assert 'new string[] { "20010", "60.0", "212.0" }' in cs and 'new string[] { "20011", "90.0" }' in cs
+    assert 'new string[] { "20010", "60.0", "212.0", "TopLeft" }' in cs and 'new string[] { "20011", "90.0" }' in cs
     # the scheme and the local switch keep their order inside each item
     assert cs.index('SelectScheme(pl, "Arriba') < cs.rindex('"UseLocalPropertyPlacements"')
     # compact by default: no before list, after = touched captions only
@@ -1163,6 +1163,8 @@ def test_copy_region_script_and_chain(monkeypatch):
     # free texts are MultiLangStrings: read with GetAsString, written with SetAsString
     assert 'TryRead(o, "Contents", null)' in cs and 'GetMethod("GetAsString", Type.EmptyTypes)' in cs and 'GetMethod("SetAsString", new Type[] { typeof(string) })' in cs
     res = r["results"]
+    assert 'else if (tn == "LocationBox")' in cs, "structure boxes are renamed too"
+    assert "picked" not in res and "copied" not in res and res["failed"] == [] and res["pickedCount"] == 0, "brief by default"
     assert gens == [{"project_name": None, "page_name": "=ST1+CAMPO/10"}]
     assert [a[1] for a in assigns] == ["c1", "c2"] and assigns[0][2]["reassign_from_part"] is True and assigns[0][2]["pin_colours"] == "sensor"
     assert res["cableResults"][0]["conductors"] == [("1", "BN")] and r["success"] is True
@@ -1176,3 +1178,31 @@ def test_copy_region_script_and_chain(monkeypatch):
     scripts.clear()
     copy_live.live_copy_region("+CE/2", 160, 200, 100, 40, x=170, y=40, touch=True, cables=False)
     assert "double rx1 = 100.0, ry1 = 40.0, rx2 = 160.0, ry2 = 200.0;" in scripts[0] and "bool inside = true" in scripts[0]
+
+
+def test_set_property_texts_anchor_corner(monkeypatch):
+    from api.actions import captions_live
+    captured = _capture(monkeypatch, captions_live)
+    captions_live.live_set_property_texts("+CE/2", "-B1", positions={"20011": [60, 212, "BottomLeft"], "20010": [10, 20]},
+                                          anchors={"20010": "Center"})
+    cs = captured["script"]
+    assert 'new string[] { "20011", "60.0", "212.0", "BottomLeft" }' in cs and 'new string[] { "20010", "10.0", "20.0", "Center" }' in cs
+    assert "cur = AnchorOf(b, w[3]);" in cs and "now = AnchorOf(b, w[3]);" in cs and 'case "BottomLeft": return new double[] { b[0], b[1] };' in cs
+    assert captions_live.live_set_property_texts("+CE/2", "-B1", positions={"20011": [1, 2, "Middle"]})["success"] is False
+    assert captions_live.live_set_property_texts("+CE/2", "-B1", positions={"20011": [1, 2]}, anchors=["x"])["success"] is False
+    # items carry anchors too
+    captured.clear()
+    captions_live.live_set_property_texts("+CE/2", items=[{"ref": "-B1", "positions": {"20011": [1, 2]}, "anchors": {"20011": "TopRight"}}])
+    assert 'new string[] { "20011", "1.0", "2.0", "TopRight" }' in captured["script"]
+
+
+def test_copy_region_brief_false_keeps_lists(monkeypatch):
+    from api.actions import copy_live, generate
+    monkeypatch.setattr(copy_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {"success": True, "inserted": 2, "cables": [],
+                                                                            "picked": [{"handle": "a"}], "copied": [{"handle": "b", "error": "x"}, {"handle": "c"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    r = copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, brief=False)["results"]
+    assert r["pickedCount"] == 1 and len(r["copied"]) == 2 and r["failed"] == [{"handle": "b", "error": "x"}]
+    r = copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0)["results"]
+    assert "copied" not in r and r["failed"] == [{"handle": "b", "error": "x"}]

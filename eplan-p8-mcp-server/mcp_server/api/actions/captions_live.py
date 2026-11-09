@@ -39,6 +39,21 @@ from .schematic_model import cs_bool, cs_text, SchematicValueError
 
 
 _HELPERS_CAPTIONS = r'''
+    // The corner of a caption box [x0, y0, x1, y1] a move refers to. A text
+    // rotated 90 deg grows from its anchor: pin its BottomLeft and a longer
+    // text keeps its foot where it was instead of running into the label.
+    static double[] AnchorOf(double[] b, string a)
+    {
+        switch (a)
+        {
+            case "BottomLeft": return new double[] { b[0], b[1] };
+            case "TopRight": return new double[] { b[2], b[3] };
+            case "BottomRight": return new double[] { b[2], b[1] };
+            case "Center": return new double[] { (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0 };
+            default: return new double[] { b[0], b[3] };
+        }
+    }
+
     // The captions a call touched (by property id or displayed text), for
     // a compact result instead of every text of the placement.
     static List<Dictionary<string, object>> TouchedCaptions(object pl, string[] sels)
@@ -186,14 +201,20 @@ def _table2(rows):
     return ", ".join('new string[] { "%s", "%r" }' % (s_, v) for s_, v in rows)
 
 
+_ANCHORS = ("TopLeft", "TopRight", "BottomLeft", "BottomRight", "Center")
+
+
 class _TextItem:
     """One placement's text edits, validated and escaped for the C# tables."""
 
     def __init__(self, ref, scheme=None, hide=None, show=None, positions=None, rotations=None,
-                 heights=None, justifications=None, **extra):
+                 heights=None, justifications=None, anchors=None, **extra):
         if extra:
             raise SchematicValueError("Unknown item keys: %s (allowed: ref, scheme, hide, show, "
-                                      "positions, rotations, heights, justifications)." % ", ".join(sorted(extra)))
+                                      "positions, rotations, heights, justifications, anchors)." % ", ".join(sorted(extra)))
+        if anchors is not None and not isinstance(anchors, dict):
+            raise SchematicValueError("anchors must be {selector: corner}.")
+        anchors = {str(k): str(v) for k, v in (anchors or {}).items()}
         self.ref_cs = cs_escape(cs_text(ref, "ref"))
         self.scheme_cs = cs_escape(cs_text(scheme, "scheme")) if scheme else ""
         self.hide_cs = [cs_escape(cs_text(str(h), "hide[]")) for h in (hide or [])]
@@ -202,9 +223,12 @@ class _TextItem:
         if positions is not None and not isinstance(positions, dict):
             raise SchematicValueError("positions must be {selector: [x, y]}.")
         for sel, xy in (positions or {}).items():
-            if not isinstance(xy, (list, tuple)) or len(xy) != 2:
-                raise SchematicValueError("positions[%r] must be [x, y]." % (sel,))
-            self.pos_rows.append((cs_escape(cs_text(str(sel), "positions key")), float(xy[0]), float(xy[1])))
+            if not isinstance(xy, (list, tuple)) or len(xy) not in (2, 3):
+                raise SchematicValueError("positions[%r] must be [x, y] or [x, y, corner]." % (sel,))
+            anchor = str(xy[2]) if len(xy) == 3 else anchors.get(str(sel), "TopLeft")
+            if anchor not in _ANCHORS:
+                raise SchematicValueError("positions[%r]: unknown corner %r. Use one of %s." % (sel, anchor, ", ".join(_ANCHORS)))
+            self.pos_rows.append((cs_escape(cs_text(str(sel), "positions key")), float(xy[0]), float(xy[1]), anchor))
 
         def num_rows(d, what):
             if d is not None and not isinstance(d, dict):
@@ -216,7 +240,7 @@ class _TextItem:
             raise SchematicValueError("justifications must be {selector: name}.")
         self.j_rows = [(cs_escape(cs_text(str(k), "justifications key")), cs_escape(cs_text(str(v), "justifications value")))
                        for k, v in (justifications or {}).items()]
-        self.pos_table = ", ".join('new string[] { "%s", "%r", "%r" }' % (s_, x, y) for s_, x, y in self.pos_rows)
+        self.pos_table = ", ".join('new string[] { "%s", "%r", "%r", "%s" }' % (s_, x, y, a) for s_, x, y, a in self.pos_rows)
         self.j_table = ", ".join('new string[] { "%s", "%s" }' % (s_, v) for s_, v in self.j_rows)
         self.any_edit = bool(self.hide_cs or self.show_cs or self.pos_rows or self.rot_rows or self.h_rows or self.j_rows)
         touched = list(self.hide_cs) + list(self.show_cs) + [r[0] for r in self.pos_rows + self.rot_rows + self.h_rows + self.j_rows]
@@ -303,7 +327,7 @@ def _text_item_block(it):
                 log.Add("rotation '" + w[0] + "' = " + deg + " deg");
             }
 
-            // 7. moves: measure-and-correct on the box's top-left corner
+            // 7. moves: measure-and-correct on the chosen corner of the box (TopLeft by default)
             List<Dictionary<string, object>> moves = new List<Dictionary<string, object>>();
             string[][] wanted = new string[][] { ''' + it.pos_table + ''' };
             foreach (string[] w in wanted)
@@ -322,7 +346,7 @@ def _text_item_block(it):
                 for (int it = 0; it < 6; it++)
                 {
                     cur = null;
-                    foreach (Dictionary<string, object> c in CaptionBoxes(pl)) if (CaptionMatches(c, w[0]) && c.ContainsKey("box")) { double[] b = (double[])c["box"]; cur = new double[] { b[0], b[3] }; break; }
+                    foreach (Dictionary<string, object> c in CaptionBoxes(pl)) if (CaptionMatches(c, w[0]) && c.ContainsKey("box")) { double[] b = (double[])c["box"]; cur = AnchorOf(b, w[3]); break; }
                     if (cur == null) { mv["error"] = "text has no box (empty text?)"; break; }
                     double dx = tx - cur[0], dy = ty - cur[1];
                     if (Math.Abs(dx) <= 0.3 && Math.Abs(dy) <= 0.3) { reached = true; break; }
@@ -330,7 +354,7 @@ def _text_item_block(it):
                     locPi.SetValue(pp, MakePoint(locPi.PropertyType, Convert.ToDouble(ld["x"]) + dx * sx, Convert.ToDouble(ld["y"]) + dy * sy), null);
                     rounds++;
                     double[] now = null;
-                    foreach (Dictionary<string, object> c in CaptionBoxes(pl)) if (CaptionMatches(c, w[0]) && c.ContainsKey("box")) { double[] b = (double[])c["box"]; now = new double[] { b[0], b[3] }; break; }
+                    foreach (Dictionary<string, object> c in CaptionBoxes(pl)) if (CaptionMatches(c, w[0]) && c.ContainsKey("box")) { double[] b = (double[])c["box"]; now = AnchorOf(b, w[3]); break; }
                     if (now == null) break;
                     if (Math.Abs(dx) > 0.3 && (now[0] - cur[0]) * dx < 0) sx = -sx;
                     if (Math.Abs(dy) > 0.3 && (now[1] - cur[1]) * dy < 0) sy = -sy;
@@ -352,6 +376,7 @@ def _text_item_block(it):
 def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide: list = None,
                             show: list = None, positions: dict = None, rotations: dict = None,
                             heights: dict = None, justifications: dict = None,
+                            anchors: dict = None,
                             items: list = None, brief: bool = True,
                             allow_real_project: bool = False,
                             timeout_seconds: float = 300.0) -> dict:
@@ -390,7 +415,13 @@ def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide
             eplan_live_property_texts(with_schemes=True) lists them.
         hide, show: Texts to hide / show, each a property id (20011,
             "20011") or the exact displayed text ("-X01").
-        positions: {selector: [x, y]} - wanted top-left of the text box.
+        positions: {selector: [x, y]} - wanted TOP-LEFT of the text box;
+            [x, y, corner] pins another corner instead ("BottomLeft",
+            "TopRight", "BottomRight", "Center"). A text rotated 90 deg
+            grows upwards from its foot, so after a longer text_replace
+            pin its BottomLeft and it stays clear of the label below.
+        anchors: {selector: corner} - the same corner choice for the
+            selectors in positions that give only [x, y].
         rotations: {selector: degrees} - 0 horizontal, 90 reads upwards.
         heights: {selector: mm} - text height.
         justifications: {selector: name} - a JustificationType name
@@ -417,7 +448,7 @@ def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide
     try:
         page_cs = cs_escape(cs_text(page, "page"))
         single = dict(scheme=scheme, hide=hide, show=show, positions=positions, rotations=rotations,
-                      heights=heights, justifications=justifications)
+                      heights=heights, justifications=justifications, anchors=anchors)
         if items is not None:
             if not isinstance(items, list) or not items:
                 raise SchematicValueError("items must be a non-empty list of {ref, ...} dicts.")

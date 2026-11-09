@@ -290,7 +290,9 @@ All of these exist as `eplan_*` tools:
   texts hidden),  - `eplan_live_set_property_texts` also takes `items=[{"ref", "positions",
   "hide", ...}, ...]`: every placement of a dense page in ONE script instead
   of one call each (612 calls on four pages, measured); the result is
-  compact by default (`brief`: only the texts touched, no "before" list),
+  compact by default (`brief`: only the texts touched, no "before" list);
+  a position may pin another corner of the text box ([x, y, "BottomLeft"]
+  or `anchors`) - a 90-deg text grows from its foot,
 
   `eplan_live_copy_pages_to_structure` (repeated stations: copy drawn
   pages to =ST2, =ST3 ... and retag every device on the copies, keeping the
@@ -304,7 +306,9 @@ All of these exist as `eplan_*` tools:
   `eplan_live_copy_region` (copy everything inside a rectangle of a page
   to another place or page as a temporary window macro, renamed through
   {old: new} maps for tags and texts - one validated sensor column becomes
-  the next in one call, cables re-assigned with part colours by pin),
+  the next in one call, cables re-assigned with part colours by pin; the
+  target page's =/+ applies on insertion, structure boxes are renamed too,
+  page properties are not copied; compact result by default - `brief`),
   `eplan_live_cables` (cables with their conductors: wire number, colour,
   cross-section, source, target), `eplan_live_place_cable_definition`
   (draw the cable definition line across wires, name it with the page's

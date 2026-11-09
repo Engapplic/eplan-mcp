@@ -169,6 +169,20 @@ _COPY_BODY = '''
                     catch (Exception re) { d["error"] = Flatten(re); renameErrors.Add(n + ": " + Flatten(re)); }
                     if (tn == "Cable") cables.Add(Handle(o));
                 }
+                else if (tn == "LocationBox")
+                {
+                    // a structure box carries its =/+ in Name; rename it like a function
+                    try
+                    {
+                        string n = PropText(o, "Name") ?? ""; d["name"] = n;
+                        string nn = Apply(n, nameMap);
+                        if (nn != n) { LockHard(o); GetWritable(o.GetType(), "Name").SetValue(o, nn, null); d["newName"] = nn; renamed++; }
+                        string vn = PropText(o, "VisibleName") ?? "";
+                        string vnn = Apply(vn, nameMap);
+                        if (vn != "" && vnn != vn) { LockHard(o); GetWritable(o.GetType(), "VisibleName").SetValue(o, vnn, null); d["newVisibleName"] = vnn; }
+                    }
+                    catch (Exception le) { d["error"] = Flatten(le); renameErrors.Add("structure box: " + Flatten(le)); }
+                }
                 else if (tn == "Text")
                 {
                     try
@@ -231,6 +245,7 @@ def live_copy_region(page: str, x1: float, y1: float, x2: float, y2: float,
                      rename: dict = None, text_replace: dict = None,
                      touch: bool = False, representation: str = "MultiLine",
                      cables: bool = True, pin_colours="auto", crossing_style: dict = None,
+                     brief: bool = True,
                      allow_real_project: bool = False, timeout_seconds: float = 300.0) -> dict:
     """
     Copy everything inside a rectangle of a page to another place - the same
@@ -270,15 +285,33 @@ def live_copy_region(page: str, x1: float, y1: float, x2: float, y2: float,
             (default True).
         pin_colours, crossing_style: Passed to that chain (see
             live_assign_cable_connections).
+        brief: Default True: counts, the objects that failed to rename,
+            the cables and their results - a whole-page copy returned 53
+            KB of object lists otherwise. False returns every picked and
+            copied object with its old and new name.
         allow_real_project: Must be True to write outside the scratch root.
         timeout_seconds: Default 300.
 
+    Notes:
+        - The =/+ structure of the TARGET page applies on insertion: a
+          column copied from =FIJ+CAMPO/10 to =MOV+CAMPO/10 comes out as
+          =MOV+CAMPO-... before any rename, so a {"=FIJ": "=MOV"} entry is
+          not needed (and matches nothing). Structure boxes keep their own
+          Name and ARE renamed by the map (=ST1 -> =ST3).
+        - Page properties (description, form, ...) are not copied: the
+          target page keeps its own; set them with eplan_set_page_property.
+        - Rotated (90 deg) function texts grow upwards from their foot: a
+          longer text_replace may run into what sits above. Pin them with
+          eplan_live_set_property_texts(positions={id: [x, y,
+          "BottomLeft"]}) afterwards, in one items call for the page.
+
     Returns:
-        {"success", "picked": [{clrType, handle, name}] (what the rectangle
-        held), "inserted": n, "copied": [{clrType, handle, name, newName?,
-        newVisibleName?, newText?, error?}], "renamed", "textsChanged",
+        {"success", "pickedCount", "inserted": n, "renamed", "textsChanged",
         "cables": [handles], "cableResults": [{handle, success, conductors,
-        error?}], "renameErrors"}.
+        error?}], "renameErrors", "failed": [copied entries with an error]};
+        with brief=False also "picked": [{clrType, handle, name}] and
+        "copied": [{clrType, handle, name, newName?, newVisibleName?,
+        newText?, error?}].
     """
     try:
         page_cs = cs_escape(cs_text(page, "page"))
@@ -321,6 +354,13 @@ def live_copy_region(page: str, x1: float, y1: float, x2: float, y2: float,
     except OSError:
         pass
     res = r.get("results") if isinstance(r.get("results"), dict) else None
+    if isinstance(res, dict):
+        res["pickedCount"] = len(res.get("picked") or [])
+        copied = res.get("copied") or []
+        res["failed"] = [c for c in copied if isinstance(c, dict) and c.get("error")]
+        if brief:
+            res.pop("picked", None)
+            res.pop("copied", None)
     if isinstance(res, dict) and res.get("inserted"):
         from .generate import generate_connections
         from . import target as _target
