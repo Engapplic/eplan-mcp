@@ -112,6 +112,14 @@ _COPY_BODY = '''
             MethodInfo wmi = wm7 ?? wm6;
             ParameterInfo[] wp = wmi.GetParameters();
             object move = Enum.Parse(wp[5].ParameterType, "Absolute");
+            // The insert writes into objects already on the target page
+            // (the connection update touches the pins of earlier devices):
+            // lock the page and everything on it first (P26009
+            // =MOV+CAMPO/13 LockingException on a pin of column ST1).
+            LockTree(dst);
+            int lockedOnPage = 0;
+            foreach (object pl0 in PagePlacements(dst)) if (pl0 != null) { LockTree(pl0); lockedOnPage++; }
+            results["lockedOnPage"] = lockedOnPage;
             object[] objs;
             try
             {
@@ -155,12 +163,18 @@ _COPY_BODY = '''
                 {
                     string n = PropText(o, "Name") ?? ""; d["name"] = n;
                     string nn = Apply(n, nameMap);
+                    // a function nested in a black box (FUNC_NESTEDCODE set)
+                    // composes its name from the box: writing it would add
+                    // the box code to the pin's own ("-B17-B17:1")
+                    string nestedCode = "";
+                    try { object np0 = TryRead(o, "NameParts", null); nestedCode = np0 == null ? "" : (PropText(np0, "FUNC_NESTEDCODE") ?? ""); } catch { }
+                    if (nestedCode != "") d["nested"] = true;
                     try
                     {
-                        if (nn != n) { LockHard(o); GetWritable(o.GetType(), "Name").SetValue(o, nn, null); d["newName"] = nn; renamed++; }
+                        if (nn != n && nestedCode == "") { LockHard(o); GetWritable(o.GetType(), "Name").SetValue(o, nn, null); d["newName"] = nn; renamed++; }
                         string vn = PropText(o, "VisibleName") ?? "";
                         string vnn = Apply(vn, nameMap);
-                        if (vn != "" && vnn != vn) { LockHard(o); GetWritable(o.GetType(), "VisibleName").SetValue(o, vnn, null); d["newVisibleName"] = vnn; }
+                        if (vn != "" && vnn != vn && nestedCode == "") { LockHard(o); GetWritable(o.GetType(), "VisibleName").SetValue(o, vnn, null); d["newVisibleName"] = vnn; }
                         object props = TryRead(o, "Properties", null);
                         string ft = props == null ? "" : (PropText(props, "FUNC_TEXT") ?? "");
                         string ftn = Apply(ft, textMap);
