@@ -16,6 +16,7 @@ import time
 import uuid
 from typing import Optional, List
 from cs_json import prepare_script
+import eplan_lock
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("EPLAN")
@@ -699,6 +700,13 @@ class EPLANConnectionManager:
         except Exception:
             pass
 
+    def lock_key(self) -> str:
+        """The cross-process lock this manager's calls queue on: one per EPLAN
+        host. Not per port: after a restart the same EPLAN answered on 49153
+        to one session and 49152 to another (2026-11-09), and two keys for one
+        EPLAN would let both through."""
+        return "eplan_%s" % (self.host or "localhost")
+
     def execute_action(self, action: str, quiet_mode: bool = False) -> dict:
         """
         Execute an EPLAN action.
@@ -721,8 +729,17 @@ class EPLANConnectionManager:
             # to avoid infinite recursion. Also run directly if quiet_mode is False.
             if action_name_lower in ("registerscript", "executescript", "unregisterscript") or not quiet_mode:
                 logger.info(f"Executing directly: {action}")
-                self.client.SynchronousMode = True
-                self.client.ExecuteAction(action)
+                # One session at a time on this EPLAN: concurrent calls from
+                # two sessions' servers hung EPLAN twice (2026-11-09).
+                try:
+                    with eplan_lock.hold(self.lock_key(), action):
+                        self.client.SynchronousMode = True
+                        self.client.ExecuteAction(action)
+                except eplan_lock.EplanBusy as busy:
+                    result = {"success": False, "errorType": "EplanBusy", "message": str(busy),
+                              "error": str(busy), "owner": busy.owner, "action": action}
+                    self._log_action(action, result, started)
+                    return result
                 result = {"success": True, "message": f"Executed directly: {action}", "action": action}
                 # Script plumbing (register/execute/unregister) is logged only
                 # as part of the wrapped action, not as separate entries.
