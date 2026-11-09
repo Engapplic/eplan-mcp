@@ -826,6 +826,14 @@ _OPS_HELPERS = r'''
     {
         object o = Resolve(page, Req(a, "ref"), labels);
         LockDeep(o);
+        if (o.GetType().Name == "Cable")
+        {
+            // moving a cable line writes into its connection definition
+            // points too (LockingException on a .../59/... object otherwise)
+            string cn = PropText(o, "Name") ?? "";
+            foreach (object pl in PagePlacements(page))
+                if (pl != null && pl.GetType().Name == "ConnectionDefinitionPoint" && (PropText(pl, "Name") ?? "") == cn) { try { Lock(pl); } catch { } }
+        }
         PropertyInfo locPi = RequireWritable(o.GetType(), "Location");
         locPi.SetValue(o, MakePoint(locPi.PropertyType, D(a, "x", 0), D(a, "y", 0)), null);
         r["handle"] = Handle(o);

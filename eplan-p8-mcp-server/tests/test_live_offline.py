@@ -1020,25 +1020,39 @@ def test_assign_replaces_a_stale_line_when_nothing_links(monkeypatch):
     gens = []
     monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
     monkeypatch.setattr(cables_live, "live_cables", lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": []}]}})
-    removed, placed = [], []
-    monkeypatch.setattr(schematic, "live_remove_placement",
-                        lambda page, handle=None, **kw: removed.append(handle) or {"results": {"success": True}})
-    monkeypatch.setattr(cables_live, "live_place_cable_definition",
-                        lambda *a, **kw: placed.append((a, kw)) or {"results": {"success": True, "handle": "h2", "conductors": [{"designation": "201"}]}})
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", reassign_from_part=True, pin_colours="sensor",
-                                                  crossing_style={"rotation": 0}, extra_points="remove")
+    recreated, scripts = [], []
+    real_exec = cables_live._execute_script
+    def exec_spy(s, timeout=0):
+        scripts.append(s)
+        if "LiveCableRecreate_" in s:
+            recreated.append(s)
+            return {"success": True, "results": {"success": True, "newHandle": "h2", "newName": "=ST1+CAMPO-W1", "removedPoints": 2}}
+        return real_exec(s, timeout=timeout)
+    monkeypatch.setattr(cables_live, "_execute_script", exec_spy)
+    calls = []
+    orig_assign = cables_live.live_assign_cable_connections
+    def assign_spy(page, cable, **kw):
+        calls.append((page, cable, kw))
+        if kw.get("replaced_line"):
+            return {"success": True, "results": {"success": True, "handle": cable, "conductors": [{"designation": "201"}]}}
+        return orig_assign(page, cable, **kw)
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections", assign_spy)
+    r = assign_spy("+CE/2", "-W1", reassign_from_part=True, pin_colours="sensor",
+                   crossing_style={"rotation": 0}, extra_points="remove")
     res = r["results"]
-    assert res["replacedLine"] is True and res["previousHandle"] == "h" and len(res["orphanPoints"]) == 3
-    assert removed == ["h"] and len(gens) == 4   # three updates, then one after the points went
-    (a, kw), = placed
-    assert a == ("+CE/2", "-W1", 70.0, 110.0, 220.0, 110.0)
-    assert kw["part"] == "FES.541348" and kw["symbol"] == "CABDL" and kw["replaced_line"] is True
+    assert res["replacedLine"] is True and res["previousHandle"] == "h" and len(res["orphanPoints"]) == 3 and res["removedPoints"] == 2
+    assert len(recreated) == 1 and len(gens) == 4   # three updates, then one after the points went
+    rc = recreated[0]
+    assert _string_literals_balanced(rc)
+    assert 'Handle(pl) == "h"' in rc and "WindowMacro.Create" in rc and 'if ((PropText(pl, "Name") ?? "") != cableName) continue;' in rc
+    assert 'cable.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(cable, null);' in rc and 'Enum.Parse(wp[5].ParameterType, "Absolute")' in rc
+    page, h, kw = calls[-1]
+    assert (page, h) == ("+CE/2", "h2") and kw["replaced_line"] is True and kw["reassign_from_part"] is True
     assert kw["pin_colours"] == "sensor" and kw["crossing_style"] == {"rotation": 0} and kw["extra_points"] == "remove"
-    assert kw["reassign_from_part"] is True
-    # the re-placed line's own assignment never replaces again
-    removed.clear(); placed.clear()
-    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", replaced_line=True)
-    assert removed == [] and placed == [] and r["results"]["conductors"] == []
+    # the clone's own assignment never replaces again
+    recreated.clear()
+    r = orig_assign("+CE/2", "-W1", replaced_line=True)
+    assert recreated == [] and r["results"]["conductors"] == []
 
 
 def test_assign_updates_once_when_the_line_crosses_nothing_yet(monkeypatch):
@@ -1208,3 +1222,56 @@ def test_copy_region_brief_false_keeps_lists(monkeypatch):
     assert r["pickedCount"] == 1 and len(r["copied"]) == 2 and r["failed"] == [{"handle": "b", "error": "x"}]
     r = copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0)["results"]
     assert "copied" not in r and r["failed"] == [{"handle": "b", "error": "x"}]
+
+
+def test_strand_layout_matches_the_nebu_macro():
+    from api.actions import strand_live
+    rows = strand_live.strand_layout([24, 32, 40], 136, 100, 28, ["BN", "BK", "BU"])
+    got = {(k, x, y): (sym, v, d) for k, sym, v, x, y, d in rows}
+    assert got[("connector", 24.0, 136.0)] == ("COST", 0, "BN") and got[("connector", 24.0, 100.0)] == ("COST", 6, "BN")
+    assert got[("connector", 32.0, 136.0)] == ("TST", 4, "BK") and got[("connector", 32.0, 100.0)] == ("TST", 2, "BK")
+    assert got[("connector", 40.0, 136.0)] == ("COST", 4, "BU") and got[("connector", 40.0, 100.0)] == ("COST", 2, "BU")
+    assert got[("inter", 28.0, 136.0)] == ("TS", 4, "") and got[("inter", 28.0, 100.0)] == ("TS", 2, "")
+    assert len(rows) == 8
+    # the rows are told apart by height, not by which was called join
+    flipped = {(k, x, y): (sym, v, d) for k, sym, v, x, y, d in strand_live.strand_layout([24, 32, 40], 100, 136, 28, None)}
+    assert flipped[("connector", 24.0, 136.0)] == ("COST", 0, "") and flipped[("connector", 24.0, 100.0)] == ("COST", 6, "")
+    import pytest
+    with pytest.raises(strand_live.SchematicValueError):
+        strand_live.strand_layout([24, 32, 40], 100, 100, 28, None)
+    with pytest.raises(strand_live.SchematicValueError):
+        strand_live.strand_layout([24, 32], 1, 2, 32, None)
+    with pytest.raises(strand_live.SchematicValueError):
+        strand_live.strand_layout([24, 32, 40], 1, 2, 28, ["BN"])
+
+
+def test_place_strand_script(monkeypatch):
+    from api.actions import strand_live
+    captured = _capture(monkeypatch, strand_live)
+    strand_live.live_place_strand("+CAMPO/1", [24, 32, 40], 136, 100, 28, designations=["BN", "BK", "BU"])
+    cs = captured["script"]
+    assert _string_literals_balanced(cs)
+    assert 'new string[] { "connector", "COST", "0", "24.0", "136.0", "BN" }' in cs
+    assert 'new string[] { "inter", "TS", "2", "28.0", "100.0", "" }' in cs
+    assert '"Eplan.EplApi.DataModel.StrandInterConnector" : "Eplan.EplApi.DataModel.StrandConnector"' in cs
+    assert 'RequireMethod(t, "Create", new string[] { "Page", "SymbolVariant" }, false)' in cs
+    assert 'SetProp(props, "STRANDCONNECTOR_DESIGNATION", it[5]);' in cs and "if (true)" in cs and "if (id == 19072)" in cs
+    captured.clear()
+    strand_live.live_place_strand("+CAMPO/1", [24, 32, 40], 136, 100, 28, hide_designation=False)
+    assert "if (false)" in captured["script"]
+    assert strand_live.live_place_strand("+CAMPO/1", "24,32", 136, 100, 28)["success"] is False
+
+
+def test_clean_cable_points_script(monkeypatch):
+    from api.actions import cables_live, generate
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True, "removed": 2, "points": []}})
+    gens = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
+    r = cables_live.live_clean_cable_points("+CAMPO/1", 60, 200, 20, 80, cable="=ST1+CAMPO-W90.1")
+    cs = scripts[0]
+    assert _string_literals_balanced(cs)
+    assert "double rx1 = 20.0, ry1 = 80.0, rx2 = 60.0, ry2 = 200.0; string cableName = \"=ST1+CAMPO-W90.1\";" in cs
+    assert 'if (des != "") continue;' in cs and '(cableName != "" && name == cableName)' in cs
+    assert gens == [{"project_name": None, "page_name": "+CAMPO/1"}] and r["results"]["connectionsGenerated"] is True
