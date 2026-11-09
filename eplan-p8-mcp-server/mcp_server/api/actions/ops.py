@@ -1018,6 +1018,27 @@ _OPS_HELPERS = r'''
         Finish(project, page, fn, a, r);
         if (Has(a, "parts")) SetParts(fn, (JArray)a["parts"], r);
         if (Has(a, "removePart")) RemoveParts(fn, a["removePart"], r);
+        // "symbol": {"library", "symbol", "variant"} swaps the placed symbol
+        // in place - DT, designation, PLC data and connections stay (an
+        // EX600's PLCCPPO terminals to PLCCPPFEM sockets, a DCP pin to DCPM;
+        // P26009 =MOV+CAMPO/13, 2026-11-09). Function.SetSymbolVariant with
+        // bUseLogicalDefinitionFromSymbol=false keeps the function definition.
+        if (Has(a, "symbol") && a["symbol"].Type == JTokenType.Object)
+        {
+            JObject sy = (JObject)a["symbol"];
+            string slib = S(sy, "library", "SPECIAL"), ssym = Req(sy, "symbol");
+            int sv = I(sy, "variant", 0);
+            object cur = TryRead(fn, "SymbolVariant", null);
+            object curSym = cur == null ? null : TryRead(cur, "Parent", null);
+            r["symbolBefore"] = (curSym == null ? "" : (PropText(curSym, "Name") ?? "")) + "/" + (cur == null ? "" : Convert.ToString(TryRead(cur, "VariantNr", null)));
+            object nv = MakeVariant(project, slib, ssym, sv);
+            MethodInfo ssv = MethodByShape(fn.GetType(), "SetSymbolVariant", new string[] { "SymbolVariant", "Boolean" }, false);
+            if (ssv != null) Call(ssv, fn, new object[] { nv, B(sy, "useLogicalDefinition", false) });
+            else RequireWritable(fn.GetType(), "SymbolVariant").SetValue(fn, nv, null);
+            object now = TryRead(fn, "SymbolVariant", null);
+            object nowSym = now == null ? null : TryRead(now, "Parent", null);
+            r["symbol"] = (nowSym == null ? "" : (PropText(nowSym, "Name") ?? "")) + "/" + (now == null ? "" : Convert.ToString(TryRead(now, "VariantNr", null)));
+        }
         // a retagged box drags its nested pins along (default); clearOwnCode
         // repairs one pin by itself
         if (B(a, "pinFollow", false)) r["pinFollow"] = PinFollowBox(fn);   // repair one pin by itself
