@@ -136,6 +136,20 @@ COMMON_PAGE_TYPES = (
 # ---------------------------------------------------------------------------
 
 _HELPERS_SCHEMATIC = r'''
+    // LockObject + SmartLock on an object and everything under it (groups,
+    // macro remnants). Page.Remove threw LockingException on a page that
+    // still held the group of an inserted Festo macro (P26009 =MOV+CAMPO/99,
+    // 2026-11-09): the page and its contents must be write-locked first.
+    static void LockTree(object o)
+    {
+        if (o == null) return;
+        try { MethodInfo lk = o.GetType().GetMethod("LockObject", Type.EmptyTypes); if (lk != null) lk.Invoke(o, null); } catch { }
+        try { MethodInfo sm = o.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(o, null); } catch { }
+        object subs = TryRead(o, "SubPlacements", null);
+        if (subs == null) return;
+        foreach (object s in (IEnumerable)subs) if (s != null) LockTree(s);
+    }
+
     // The Symbol.Type values that are CONNECTION symbols rather than devices.
     // Kept beside the placement code because Function.Create's refusal of one is
     // otherwise unattributable.
@@ -1502,8 +1516,25 @@ def live_remove_placement(page: str, handle: str = None,
             results["page"] = PropText(page, "Name");
             // Record what is about to be destroyed BEFORE destroying it.
             results["page_before"] = BRIEF ? PageSummary(page) : ReadPage(page, 500, false, null);
+            // write-lock the page and everything on it first (macro groups included)
+            LockTree(page);
+            List<object> onPage = new List<object>();
+            foreach (object pl in PagePlacements(page)) if (pl != null) { LockTree(pl); onPage.Add(pl); }
             MethodInfo rm = RequireMethod(page.GetType(), "Remove", new string[] { }, false);
-            Call(rm, page, null);
+            try { Call(rm, page, null); }
+            catch (Exception first)
+            {
+                // a stubborn object: empty the page object by object, then remove it
+                int cleared = 0; List<string> errs = new List<string>();
+                foreach (object pl in onPage)
+                {
+                    try { LockTree(pl); MethodInfo prm = pl.GetType().GetMethod("Remove", Type.EmptyTypes); if (prm != null) { prm.Invoke(pl, null); cleared++; } }
+                    catch (Exception pe) { errs.Add(pl.GetType().Name + " " + Handle(pl) + ": " + Flatten(pe)); }
+                }
+                results["clearedFirst"] = cleared; results["clearErrors"] = errs; results["firstError"] = Flatten(first);
+                LockTree(page);
+                Call(rm, page, null);
+            }
             results["pageRemoved"] = true;
 '''
     else:
@@ -1521,6 +1552,7 @@ def live_remove_placement(page: str, handle: str = None,
 ''' + expect_block + '''            results["page"] = PropText(page, "Name");
             results["removed"] = DumpPlacement(target, false);
             results["removedType"] = target.GetType().Name;
+            LockTree(target);
             MethodInfo rm = RequireMethod(target.GetType(), "Remove", new string[] { }, false);
             Call(rm, target, null);
             results["page_after"] = BRIEF ? PageSummary(page) : ReadPage(page, 200, false, null);
