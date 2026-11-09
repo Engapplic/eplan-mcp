@@ -365,6 +365,7 @@ from .captions_live import (
 )
 
 from .copy_live import live_copy_region
+from .strand_live import live_place_strand
 from .structure_live import (
     live_copy_pages_to_structure,
 )
@@ -385,6 +386,7 @@ from .cables_live import (
     live_assign_cable_connections,
     live_decorate_cable_crossings,
     live_set_conductor_colours,
+    live_clean_cable_points,
 )
 
 from .project_live import (
@@ -565,6 +567,8 @@ __all__ = [
     'live_report_types', 'live_create_report',
     'live_copy_pages_to_structure',
     'live_copy_region',
+    'live_clean_cable_points',
+    'live_place_strand',
     'live_panel_captions', 'live_set_panel_captions',
     'live_property_texts', 'live_set_property_texts',
     'live_terminal_strips', 'live_set_terminal_strip_definition',

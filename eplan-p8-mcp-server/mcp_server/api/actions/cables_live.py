@@ -30,6 +30,7 @@ Learned live on 2026.0.3 (scratch copy of TEST-S7-1200):
   cable functions and diagrams are allowed, 3D routing is not.
 """
 
+import os
 import uuid
 
 from ._base import cs_escape
@@ -252,6 +253,98 @@ _ORPHAN_BODY = '''
             results["errors"] = errors;
             results["success"] = errors.Count == 0;
 '''
+
+
+# A line that linked nothing after three updates is stale for EPLAN: only a
+# NEW line links in its first update. Re-creating it by Cable.Create lost
+# the full name (the page structure took over), the part and the text
+# arrangement (P26009 -W90.1, 2026-11-09). A one-object window macro keeps
+# all three: write the line to a temp .ema, remove it, insert the macro at
+# the same point. Its own leftover points (same name, no wire number) go
+# too - they are what kept the wires in Cable kind in the first place.
+_RECREATE_BODY = '''
+            object page = FindPage(project, "PAGENAME");
+            object cable = null;
+            foreach (object pl in PagePlacements(page))
+                if (pl != null && pl.GetType().Name == "Cable" && Handle(pl) == "HANDLE") { cable = pl; break; }
+            if (cable == null) throw new Exception("No cable line with handle HANDLE on page PAGENAME.");
+            string cableName = PropText(cable, "Name") ?? "";
+            object loc = TryRead(cable, "Location", null);
+            double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+            LockAny(page);
+            // 1. leftover points of this very cable anywhere on the page (no wire number)
+            int removedPoints = 0;
+            List<object> snap = new List<object>();
+            foreach (object q0 in (IEnumerable)PagePlacements(page)) snap.Add(q0);
+            foreach (object pl in snap)
+            {
+                if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                if ((PropText(pl, "Name") ?? "") != cableName) continue;
+                object pp = TryRead(pl, "Properties", null);
+                if (pp != null && (PropText(pp, "CONNECTION_DESIGNATION") ?? "") != "") continue;
+                try { LockHard(pl); pl.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(pl, null); removedPoints++; } catch { }
+            }
+            results["removedPoints"] = removedPoints;
+            // 2. the line as a one-object macro
+            Type wmT = FindType("Eplan.EplApi.DataModel.MasterData.WindowMacro");
+            object wm = Activator.CreateInstance(wmT);
+            MethodInfo create = null;
+            foreach (MethodInfo m in wmT.GetMethods())
+            {
+                ParameterInfo[] ps = m.GetParameters();
+                if (m.Name == "Create" && ps.Length == 6 && ps[0].ParameterType == typeof(string) && ps[3].ParameterType.IsArray && ps[3].ParameterType.GetElementType().Name == "Placement") create = m;
+            }
+            if (create == null) throw new Exception("WindowMacro.Create(string, RepresentationType, int, Placement[], MultiLangString, PointD) not found.");
+            ParameterInfo[] cp = create.GetParameters();
+            object rep = Enum.Parse(cp[1].ParameterType, "MultiLine");
+            Array arr = Array.CreateInstance(cp[3].ParameterType.GetElementType(), 1); arr.SetValue(cable, 0);
+            string macroFile = @"MACROFILE";
+            try { create.Invoke(wm, new object[] { macroFile, rep, 0, arr, Activator.CreateInstance(cp[4].ParameterType), MakePoint(cp[5].ParameterType, lx, ly) }); }
+            catch (TargetInvocationException tie) { throw new Exception("WindowMacro.Create failed: " + Flatten(tie.InnerException ?? tie)); }
+            // 3. out with the old line
+            LockHard(cable);
+            cable.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(cable, null);
+            // 4. in with the clone, same point, names kept
+            Type insType = FindType("Eplan.EplApi.HEServices.Insert");
+            object ins = Activator.CreateInstance(insType);
+            MethodInfo wm6 = null;
+            foreach (MethodInfo m in insType.GetMethods())
+            {
+                ParameterInfo[] ps = m.GetParameters();
+                if (m.Name == "WindowMacro" && ps.Length == 6 && ps[0].ParameterType == typeof(string)) wm6 = m;
+            }
+            if (wm6 == null) throw new Exception("Insert.WindowMacro(string, RepresentationType, int, Page, PointD, MoveKind) not found.");
+            ParameterInfo[] wp = wm6.GetParameters();
+            object[] objs;
+            try { objs = (object[])wm6.Invoke(ins, new object[] { macroFile, rep, 0, page, MakePoint(wp[4].ParameterType, lx, ly), Enum.Parse(wp[5].ParameterType, "Absolute") }); }
+            catch (TargetInvocationException tie) { throw new Exception("Insert.WindowMacro failed: " + Flatten(tie.InnerException ?? tie)); }
+            string newHandle = null;
+            if (objs != null) foreach (object o in objs) if (o != null && o.GetType().Name == "Cable") { newHandle = Handle(o); results["newName"] = PropText(o, "Name"); }
+            if (newHandle == null) throw new Exception("The clone inserted no cable line.");
+            results["newHandle"] = newHandle; results["success"] = true;
+'''
+
+
+def _recreate_line(page: str, handle: str, allow_real_project: bool, timeout_seconds: float) -> dict:
+    # Clone the line through a one-object window macro (see _RECREATE_BODY).
+    macro_dir = os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or ".", "eplan_mcp_macros")
+    os.makedirs(macro_dir, exist_ok=True)
+    macro_file = os.path.join(macro_dir, "line_%s.ema" % uuid.uuid4().hex[:8])
+    body = (_guard_prelude(allow_real_project)
+            + _RECREATE_BODY.replace("PAGENAME", cs_escape(page)).replace("HANDLE", cs_escape(handle))
+            .replace("MACROFILE", macro_file.replace('"', '""')))
+    r = _execute_script(
+        live._script("LiveCableRecreate_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+    try:
+        if os.path.exists(macro_file):
+            os.remove(macro_file)
+    except OSError:
+        pass
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    return res if isinstance(res, dict) else {"success": False, "error": str(res)}
 
 
 def _orphan_points(page: str, coords, remove: bool, allow_real_project: bool,
@@ -1010,7 +1103,10 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             conductors = _read()
             if len(conductors) >= wanted:
                 break
-        if not conductors and wanted and not replaced_line:
+        if wanted and len(conductors) < wanted and not replaced_line:
+            # Some wires still linked to nothing (a moved line leaves its old
+            # points on the wires it no longer crosses, and those wires keep
+            # the Cable kind): same cure as for none at all.
             # Nothing linked although wires were assigned: the usual cause
             # is the crossing points of a DELETED line still sitting on the
             # wires (see _ORPHAN_BODY). A line already placed over them is
@@ -1026,29 +1122,23 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                     # cheap, and replaced_line keeps it from looping.
                     if orp.get("removed"):
                         generate_connections(project_name=_target.get() or None, page_name=page)
-                    rm = schematic.live_remove_placement(page, handle=res.get("handle"),
-                                                         allow_real_project=allow_real_project,
-                                                         timeout_seconds=timeout_seconds)
-                    rm_res = rm.get("results") if isinstance(rm.get("results"), dict) else rm
-                    if isinstance(rm_res, dict) and rm_res.get("success"):
-                        parts = res.get("cableParts") or []
-                        again = live_place_cable_definition(
-                            page, res.get("cableVisibleName") or res.get("cable") or cable,
-                            seg[0], seg[1], seg[2], seg[3], part=parts[0] if parts else None,
-                            text=res.get("cableText") or None,
-                            symbol=res.get("cableSymbol") or "CABDL", variant=int(res.get("cableVariant") or 0),
-                            generate=True, crossing_texts=crossing_texts, crossing_style=crossing_style,
+                    rc = _recreate_line(page, res.get("handle"), allow_real_project, timeout_seconds)
+                    if rc.get("success") and rc.get("newHandle"):
+                        again = live_assign_cable_connections(
+                            page, rc["newHandle"], generate=True, reassign_from_part=reassign_from_part,
+                            crossing_texts=crossing_texts, crossing_style=crossing_style,
                             pin_colours=pin_colours, extra_points=extra_points,
-                            reassign_from_part=reassign_from_part, replaced_line=True,
-                            allow_real_project=allow_real_project, timeout_seconds=timeout_seconds)
+                            allow_real_project=allow_real_project, timeout_seconds=timeout_seconds,
+                            replaced_line=True)
                         again_res = again.get("results") if isinstance(again.get("results"), dict) else again
                         if isinstance(again_res, dict):
                             again_res["replacedLine"] = True
                             again_res["orphanPoints"] = pts
+                            again_res["removedPoints"] = rc.get("removedPoints")
                             again_res["previousHandle"] = res.get("handle")
                         return again
                     res["orphanPoints"] = pts
-                    res["replaceError"] = (rm_res or {}).get("error") if isinstance(rm_res, dict) else str(rm_res)
+                    res["replaceError"] = rc.get("error") or rc.get("errors")
                 else:
                     res["orphanPoints"] = pts
                     res["orphanError"] = orp.get("error") or orp.get("errors")
@@ -1267,4 +1357,84 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
         res["propertyTexts"] = t_res
         if isinstance(t_res, dict) and not t_res.get("success"):
             res["propertyTextsError"] = t_res.get("error") or t_res.get("errors")
+    return r
+
+
+def live_clean_cable_points(page: str, x1: float, y1: float, x2: float, y2: float,
+                            cable: str = None, allow_real_project: bool = False,
+                            timeout_seconds: float = 120.0) -> dict:
+    """
+    Remove the connection definition points a deleted or moved cable line
+    left on the wires inside a rectangle. WRITES - scratch-only by default.
+
+    A wire that still carries such a point stays "Cable" kind with no line
+    and never links to a new line (and shows the old cable's name at the
+    point). Removed here: points with no line and Cable kind, nameless
+    points with no wire number, and - with `cable` - every point named
+    after that cable with no wire number. Points carrying a wire number
+    (CONNECTION_DESIGNATION) are kept. One connection update follows.
+
+    Args:
+        page: Page name.
+        x1, y1, x2, y2: The rectangle, any corner order, in mm.
+        cable: Full cable name ("=ST1+CAMPO-W90.1") whose leftover points
+            go too, wherever they sit inside the rectangle.
+        allow_real_project: Must be True to write outside the scratch root.
+        timeout_seconds: Default 120.
+
+    Returns:
+        {"success", "removed": n, "points": [{handle, name, kind, x, y,
+        removed}], "connectionsGenerated"}.
+    """
+    try:
+        page_cs = cs_text(page, "page")
+        coords = [float(v) for v in (x1, y1, x2, y2)]
+        cable_cs = cs_escape(cs_text(cable, "cable")) if cable else ""
+    except (SchematicValueError, TypeError, ValueError) as exc:
+        return _err(exc if isinstance(exc, SchematicValueError) else SchematicValueError(str(exc)))
+    rx1, rx2 = min(coords[0], coords[2]), max(coords[0], coords[2])
+    ry1, ry2 = min(coords[1], coords[3]), max(coords[1], coords[3])
+    body = (_guard_prelude(allow_real_project) + '''
+            object page = FindPage(project, "PAGENAME");
+            double rx1 = RX1, ry1 = RY1, rx2 = RX2, ry2 = RY2; string cableName = "CABLENAME";
+            LockAny(page);
+            List<object> snap = new List<object>();
+            foreach (object q0 in (IEnumerable)PagePlacements(page)) snap.Add(q0);
+            List<Dictionary<string, object>> found = new List<Dictionary<string, object>>();
+            int removed = 0;
+            foreach (object pl in snap)
+            {
+                if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
+                object loc = TryRead(pl, "Location", null); if (loc == null) continue;
+                double x = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), y = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
+                if (x < rx1 - 0.3 || x > rx2 + 0.3 || y < ry1 - 0.3 || y > ry2 + 0.3) continue;
+                string kind = Convert.ToString(TryRead(pl, "KindOfWire", null));
+                object line = TryRead(pl, "CableDefinitionLine", null);
+                string name = PropText(pl, "Name") ?? "";
+                object pp = TryRead(pl, "Properties", null);
+                string des = pp == null ? "" : (PropText(pp, "CONNECTION_DESIGNATION") ?? "");
+                if (des != "") continue;
+                bool nameless = name == "" || name.EndsWith("+") || name.EndsWith("=");
+                bool orphan = (line == null && (kind == "Cable" || nameless)) || (cableName != "" && name == cableName);
+                if (!orphan) continue;
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(pl); d["name"] = name; d["kind"] = kind; d["x"] = x; d["y"] = y;
+                try { LockHard(pl); pl.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(pl, null); d["removed"] = true; removed++; }
+                catch (Exception e) { d["error"] = Flatten(e); }
+                found.Add(d);
+            }
+            results["points"] = found; results["removed"] = removed; results["success"] = true;
+'''.replace("PAGENAME", cs_escape(page_cs)).replace("CABLENAME", cable_cs)
+            .replace("RX1", repr(rx1)).replace("RY1", repr(ry1)).replace("RX2", repr(rx2)).replace("RY2", repr(ry2)))
+    r = _execute_script(
+        live._script("LiveCleanPoints_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+    res = r.get("results") if isinstance(r.get("results"), dict) else None
+    if isinstance(res, dict) and res.get("removed"):
+        from .generate import generate_connections
+        from . import target as _target
+        g = generate_connections(project_name=_target.get() or None, page_name=page_cs)
+        res["connectionsGenerated"] = bool(g.get("success"))
     return r

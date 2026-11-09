@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **251 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -342,8 +342,15 @@ All of these exist as `eplan_*` tools:
   without writing the cable into it is assigned too, and pre-existing
   connections are locked with retries before the write; when three
   updates link nothing the line is stale: its orphan points are removed
-  and the line is placed again on the same wires - `replacedLine`, the
-  old handle is gone),
+  and the line is cloned through a one-object window macro on the same
+  wires, full name / part / text arrangement kept - `replacedLine`, the
+  old handle is gone), `eplan_live_clean_cable_points` (remove the points
+  a deleted or moved cable line left on the wires inside a rectangle -
+  they keep a wire in Cable kind so no new line links to it),
+  `eplan_live_place_strand` (the conductor bundle of a sensor lead the way
+  the Festo NEBU macro draws it: angle / T strand connectors on each wire
+  at the joining and splitting rows, an interconnector on the trunk,
+  colour designations hidden),
   `eplan_live_project_templates` (the .zw9 basic projects / .ept templates
   under $(MD_TEMPLATES)) and `eplan_live_create_project` (new project from
   one of them via ProjectManager.CreateProject, left open and set as the
