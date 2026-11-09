@@ -377,7 +377,7 @@ def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide
                             show: list = None, positions: dict = None, rotations: dict = None,
                             heights: dict = None, justifications: dict = None,
                             anchors: dict = None,
-                            items: list = None, brief: bool = True,
+                            items: list = None, brief: bool = True, verbose: bool = False,
                             allow_real_project: bool = False,
                             timeout_seconds: float = 300.0) -> dict:
     """
@@ -431,7 +431,11 @@ def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide
             "rotations"?, "heights"?, "justifications"?}, ...] - many
             placements in one script. With `items`, the top-level ref and
             edit arguments must be empty.
-        brief: Default True: the result carries only the texts that were
+        verbose: Default False: the result is a SUMMARY - {"success",
+            "count", "failed", "errors": [{ref, error}], "unreached":
+            [{ref, selector}] for moves that did not land}. True returns
+            each placement's texts (shaped by `brief`).
+        brief: With verbose: the result carries only the texts that were
             touched ("after") and no "before" list - one call used to
             return 2-4 KB, which on 600 calls is a context full of boxes
             nobody reads. False returns every caption before and after.
@@ -489,6 +493,32 @@ def live_set_property_texts(page: str, ref: str = None, scheme: str = None, hide
         timeout=timeout_seconds,
     )
     res = r.get("results") if isinstance(r.get("results"), dict) else None
+    if not verbose and isinstance(res, dict) and isinstance(res.get("items"), list):
+        errors, unreached = [], []
+        for it in res["items"]:
+            if not isinstance(it, dict):
+                continue
+            if not it.get("success"):
+                errors.append({"ref": it.get("ref"), "error": it.get("error")})
+            for mv in it.get("moves") or []:
+                if isinstance(mv, dict) and mv.get("reached") is False:
+                    unreached.append({"ref": it.get("ref"), "selector": mv.get("selector")})
+        summary = {"project": res.get("project"), "success": bool(res.get("success")),
+                   "count": res.get("count"), "failed": res.get("failed"), "errors": errors}
+        if items is None and len(res["items"]) == 1 and isinstance(res["items"][0], dict):
+            # one ref: who was touched, and the error if any
+            one = res["items"][0]
+            summary = {"project": res.get("project"), "success": bool(one.get("success")),
+                       "handle": one.get("handle"), "name": one.get("name")}
+            if one.get("error"):
+                summary["error"] = one["error"]
+        if unreached:
+            summary["unreached"] = unreached
+        r["results"] = summary
+        r["success"] = summary["success"]
+        if items is None and summary.get("error"):
+            r["error"] = summary["error"]
+        return r
     if items is None and isinstance(res, dict) and isinstance(res.get("items"), list) and len(res["items"]) == 1:
         # one ref: the same flat shape as before the batch form existed
         flat = dict(res["items"][0]); flat.pop("ref", None)

@@ -1960,8 +1960,9 @@ def _err(exc):
     return {"success": False, "error": str(exc)}
 
 
-def live_batch(page: str, operations: list, read_back: bool = False,
-               stop_on_error: bool = True, brief: bool = True,
+def live_batch(page: str, operations: list = None, read_back: bool = False,
+               stop_on_error: bool = True, brief: bool = True, verbose: bool = False,
+               operations_file: str = None,
                allow_real_project: bool = False,
                timeout_seconds: float = 300.0) -> dict:
     """
@@ -2020,6 +2021,14 @@ def live_batch(page: str, operations: list, read_back: bool = False,
         page: Page name, as live_read_page reports it.
         operations: The list above. An op that fails stops the batch
             (stop_on_error) and the result says at which index.
+        operations_file: Path of a JSON file holding the list (or
+            {"operations": [...]}) instead of `operations` - a few hundred
+            generated ops cost nothing in the conversation this way.
+        verbose: Default False: the result is a SUMMARY - {"success",
+            "count", "failed", "errors": [{index, op, label?, error}],
+            "created": [{index, label?, handle}] for the ops that made an
+            object, "labels", "stoppedAt"?, "overlaps"?}. True returns
+            every op's echo (shaped by `brief`).
         read_back: Also return the page's devices (page_after, limited to
             Function/Terminal/PLC/BoxedDevice - graphics are left out) and
             "overlaps": pairs of device outlines that intersect without one
@@ -2044,13 +2053,60 @@ def live_batch(page: str, operations: list, read_back: bool = False,
         page = cs_text(page, "page")
     except SchematicValueError as exc:
         return _err(exc)
+    if operations_file:
+        if operations is not None:
+            return {"success": False, "error": "Pass operations OR operations_file, not both."}
+        try:
+            with open(operations_file, encoding="utf-8") as fh:
+                operations = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return {"success": False, "error": "Cannot read operations_file %r: %s" % (operations_file, exc)}
+        if isinstance(operations, dict):
+            operations = operations.get("operations")
     if not isinstance(operations, list) or not all(isinstance(o, dict) for o in operations):
         return {"success": False, "error": "operations must be a list of {\"op\": ...} dicts."}
     for i, op in enumerate(operations):
         if not isinstance(op.get("op"), str):
             return {"success": False, "error": "operation %d has no 'op' name." % i}
-    return run_ops(page, operations, read_back=read_back, stop_on_error=stop_on_error,
-                   allow_real_project=allow_real_project, timeout_seconds=timeout_seconds, brief=brief)
+    out = run_ops(page, operations, read_back=read_back, stop_on_error=stop_on_error,
+                  allow_real_project=allow_real_project, timeout_seconds=timeout_seconds, brief=brief)
+    return out if verbose else summarize_batch(out)
+
+
+# The ops that make an object: their handle is what the caller needs back.
+_CREATING_OPS = ("place", "rect", "macro", "structurebox", "text", "line", "image", "dimension")
+
+
+def summarize_batch(out):
+    """A batch result reduced to what the caller acts on: counts, the
+    errors and the handles of the objects made (a 300-op batch echoed
+    ~60 KB before, P26009 2026-11-09)."""
+    if not isinstance(out, dict) or "ops" not in out:
+        return out
+    ops_ = out.get("ops") or []
+    errors, created = [], []
+    for op in ops_:
+        if not isinstance(op, dict):
+            continue
+        if not op.get("success"):
+            e = {"index": op.get("index"), "op": op.get("op"), "error": op.get("error")}
+            if op.get("label"):
+                e["label"] = op["label"]
+            errors.append(e)
+        elif op.get("op") in _CREATING_OPS and op.get("handle"):
+            c = {"index": op.get("index"), "handle": op.get("handle")}
+            if op.get("label"):
+                c["label"] = op["label"]
+            created.append(c)
+    keep = ("success", "engine", "project", "page", "labels", "failed", "stoppedAt", "overlaps", "error", "errorType")
+    s = {k: out[k] for k in keep if k in out}
+    s["count"] = len(ops_)
+    s["errors"] = errors
+    if created:
+        s["created"] = created
+    if isinstance(out.get("page_after"), dict):
+        s["placementCount"] = out["page_after"].get("placementCount")
+    return s
 
 
 def live_find_placements(page: str, name: str = None, contains: str = None,
@@ -2451,7 +2507,8 @@ def live_update_placement(page: str, ref: str, tag: str = None, visible_name: st
 
 
 def live_render_page(page: str, output_dir: str = None, image_width: int = 2000,
-                     project_name: str = None) -> dict:
+                     project_name: str = None, region: list = None, scale: float = None,
+                     width: int = None) -> dict:
     """
     Export one page as a PNG so it can be looked at. Read-only.
 
@@ -2462,12 +2519,18 @@ def live_render_page(page: str, output_dir: str = None, image_width: int = 2000,
     Args:
         page: Page name, e.g. "=+CE/0".
         output_dir: Folder for the image (default: <scratch root>/renders).
-        image_width: Pixel width (default 2000).
+        image_width: Pixel width of the whole page (default 2000; 6000 when
+            a region is cut, so the crop stays sharp).
         project_name: Project path; defaults to the target project.
+        region: [x1, y1, x2, y2] in page mm (EPLAN coordinates, y up): the
+            image is cut to that rectangle on the server and only the crop
+            is returned as "crop" - look at one column instead of the page.
+        scale: Enlarge (or shrink) the crop by this factor.
+        width: Or resize the crop to this pixel width.
 
     Returns:
-        {"success", "files": [paths written or updated], "export": the
-         export action's result}
+        {"success", "files": [paths written or updated], "crop"? (path),
+         "region"?, "pxPerMm"?, "export": the export action's result}
     """
     from .export_ import export_graphics_pages
     out_dir = output_dir or os.path.join(SCRATCH_ROOT, "renders")
@@ -2477,6 +2540,14 @@ def live_render_page(page: str, output_dir: str = None, image_width: int = 2000,
         return {f: os.path.getmtime(os.path.join(out_dir, f))
                 for f in os.listdir(out_dir) if f.lower().endswith(".png")}
 
+    if region is not None:
+        try:
+            region = [float(v) for v in region]
+            if len(region) != 4:
+                raise ValueError
+        except (TypeError, ValueError):
+            return {"success": False, "error": "region must be [x1, y1, x2, y2] in page mm."}
+        image_width = max(int(image_width), 6000)
     before = snapshot()
     res = export_graphics_pages(destination_path=out_dir, page_name=page, project_name=project_name,
                                 format="PNG", image_width=int(image_width))
@@ -2486,7 +2557,47 @@ def live_render_page(page: str, output_dir: str = None, image_width: int = 2000,
     out = {"success": ok, "files": files, "export": res}
     if res.get("success") and not files:
         out["error"] = "The export reported success but wrote no PNG into %s." % out_dir
+    if ok and region is not None:
+        try:
+            out.update(_crop_render(files[0], page, region, scale, width))
+        except Exception as exc:  # the full render is still there
+            out["cropError"] = str(exc)
     return out
+
+
+def _page_size_mm(page):
+    # The page's own size (Page.Size, mm); A3 landscape when it cannot be read.
+    try:
+        r = schematic.live_read_page(page, include_pins=False, limit=1, types=["__none__"])
+        size = r.get("size") or (r.get("results") or {}).get("size")
+        if isinstance(size, dict) and size.get("x") and size.get("y"):
+            return float(size["x"]), float(size["y"])
+    except Exception:
+        pass
+    return 420.0, 297.0
+
+
+def _crop_render(path, page, region, scale=None, width=None):
+    """Cut a rendered page to a rectangle in page mm (y up)."""
+    from PIL import Image
+    im = Image.open(path)
+    pw, ph = _page_size_mm(page)
+    ppm = im.size[0] / pw
+    x1, x2 = sorted((region[0], region[2]))
+    y1, y2 = sorted((region[1], region[3]))
+    box = (max(0, int(x1 * ppm)), max(0, int((ph - y2) * ppm)),
+           min(im.size[0], int(round(x2 * ppm))), min(im.size[1], int(round((ph - y1) * ppm))))
+    crop = im.crop(box)
+    if width:
+        w = int(width)
+        crop = crop.resize((w, max(1, int(crop.size[1] * w / max(1, crop.size[0])))), Image.LANCZOS)
+    elif scale and float(scale) != 1.0:
+        f = float(scale)
+        crop = crop.resize((max(1, int(crop.size[0] * f)), max(1, int(crop.size[1] * f))), Image.LANCZOS)
+    stem, _ = os.path.splitext(path)
+    out_path = "%s_crop_%g_%g_%g_%g.png" % (stem, x1, y1, x2, y2)
+    crop.save(out_path)
+    return {"crop": out_path, "region": [x1, y1, x2, y2], "pxPerMm": round(ppm, 3), "cropSize": list(crop.size)}
 
 
 def live_check_page(page: str, limit: int = 200, project_name: str = None,

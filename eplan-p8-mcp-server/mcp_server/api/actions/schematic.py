@@ -1424,7 +1424,8 @@ def _pin_point(side, index):
 # ---------------------------------------------------------------------------
 
 def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
-                   types: list = None, timeout_seconds: float = 90.0) -> dict:
+                   types: list = None, region: list = None, name_regex: str = None,
+                   fields: list = None, timeout_seconds: float = 90.0) -> dict:
     """
     Read one page's full state: every placement, its geometry and its pins.
 
@@ -1450,6 +1451,13 @@ def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
             held 1887 placements whose first 40 were all PolyLine. Unfiltered,
             `limit` is exhausted on graphics before a single device is reached,
             and the page looks empty.
+        region: [x1, y1, x2, y2] in page mm - only placements whose
+            location lies inside (one column instead of the page).
+        name_regex: Only placements whose name matches (Python re.search),
+            e.g. "-MB0[1-4]" or "-W17$".
+        fields: Keep only these keys per placement (the handle always
+            stays), e.g. ["name", "location", "symbol"] - drops pins,
+            boxes and absent-member lists from the answer.
         timeout_seconds: Default 90s.
 
     Returns:
@@ -1477,8 +1485,18 @@ def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
             types = [cs_escape(cs_text(t, "types entry")) for t in types]
             if not types:
                 types = None
+        region_f = _region(region)
+        rx = re.compile(name_regex) if name_regex else None
+        if fields is not None and (not isinstance(fields, list) or not all(isinstance(f, str) for f in fields)):
+            raise SchematicValueError("fields must be a list of key names.")
+    except re.error as exc:
+        return {"success": False, "error": "name_regex: %s" % exc}
     except SchematicValueError as exc:
         return _err(exc)
+    filtering = region_f is not None or rx is not None
+    user_limit = limit
+    if filtering:
+        limit = 5000  # filter the whole page, then cut to the caller's limit
 
     only = ("null" if not types
             else "new string[] { %s }" % ", ".join('"%s"' % t for t in types))
@@ -1502,7 +1520,42 @@ def live_read_page(page: str, include_pins: bool = True, limit: int = 200,
     ))
     if out.get("success"):
         _annotate_pins(out)
+        if filtering or fields:
+            _filter_placements(out, region_f, rx, fields, user_limit, filtering)
     return out
+
+
+def _region(region):
+    if region is None:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(v) for v in region]
+    except (TypeError, ValueError):
+        raise SchematicValueError("region must be [x1, y1, x2, y2] in page mm.")
+    return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+
+def _in_region(loc, reg, tol=0.01):
+    if not isinstance(loc, dict) or loc.get("x") is None or loc.get("y") is None:
+        return False
+    return reg[0] - tol <= loc["x"] <= reg[2] + tol and reg[1] - tol <= loc["y"] <= reg[3] + tol
+
+
+def _filter_placements(out, reg, rx, fields, limit, filtering):
+    pls = out.get("placements") or []
+    if reg is not None:
+        pls = [p for p in pls if _in_region(p.get("location"), reg)]
+    if rx is not None:
+        pls = [p for p in pls if rx.search(p.get("name") or "")]
+    if filtering:
+        out["matched"] = len(pls)
+        out["truncated"] = bool(out.get("truncated")) or len(pls) > limit
+        pls = pls[:limit]
+        out["returned"] = len(pls)
+    if fields:
+        keep = set(fields) | {"handle"}
+        pls = [{k: v for k, v in p.items() if k in keep} for p in pls]
+    out["placements"] = pls
 
 
 # ---------------------------------------------------------------------------
@@ -1934,7 +1987,8 @@ _HELPERS_CONNECTIONS = r'''
 '''
 
 
-def live_read_connections(page: str = None, limit: int = 200,
+def live_read_connections(page: str = None, limit: int = 200, device: str = None,
+                          region: list = None, kind: str = None, summary: bool = False,
                           timeout_seconds: float = 120.0) -> dict:
     """
     Read the project's LOGICAL connections - what is actually wired to what.
@@ -1958,6 +2012,13 @@ def live_read_connections(page: str = None, limit: int = 200,
         page: Only connections on this page. Omit for the whole project.
         limit: Max connections returned (default 200). The true total is always
             reported, so a truncated read is never mistaken for the whole set.
+        device: Only connections with an end on a device whose tag contains
+            this (case-insensitive), e.g. "-W01.1" or "-X17".
+        region: [x1, y1, x2, y2] in page mm - only connections with an end
+            located inside.
+        kind: Only this KindOfWire ("Cable", "IndividualConnection", ...).
+        summary: Only the counts - "byKind" {kind: n} and "matched" - and no
+            list: the cheap check after a batch.
         timeout_seconds: Default 120s - a project-wide walk is not fast.
 
     Returns:
@@ -1976,8 +2037,13 @@ def live_read_connections(page: str = None, limit: int = 200,
     try:
         limit = cs_int(limit, "limit", minimum=1, maximum=5000)
         page_cs = cs_escape(cs_text(page, "page")) if page else None
+        reg = _region(region)
     except SchematicValueError as exc:
         return _err(exc)
+    post = bool(device or reg is not None or kind or summary)
+    user_limit = limit
+    if post:
+        limit = 5000
 
     page_filter = ""
     if page_cs:
@@ -2025,6 +2091,28 @@ def live_read_connections(page: str = None, limit: int = 200,
                 extra_helpers=_HELPERS_SCHEMATIC + _HELPERS_CONNECTIONS),
         timeout=timeout_seconds,
     ))
+    if out.get("success") and post:
+        conns = out.get("connections") or []
+        if device:
+            d = device.lower()
+            conns = [c for c in conns if any(d in (((c.get(e) or {}).get("device")) or "").lower() for e in ("from", "to"))]
+        if reg is not None:
+            conns = [c for c in conns if any(_in_region((c.get(e) or {}).get("location"), reg) for e in ("from", "to"))]
+        if kind:
+            conns = [c for c in conns if (c.get("kindOfWire") or "") == kind]
+        by_kind = {}
+        for c in conns:
+            k = c.get("kindOfWire") or "?"
+            by_kind[k] = by_kind.get(k, 0) + 1
+        out["byKind"] = by_kind
+        out["filtered"] = len(conns)
+        if summary:
+            out.pop("connections", None)
+            out["returned"] = 0
+        else:
+            out["truncated"] = bool(out.get("truncated")) or len(conns) > user_limit
+            out["connections"] = conns[:user_limit]
+            out["returned"] = len(out["connections"])
     if out.get("success"):
         if page:
             out["page"] = page

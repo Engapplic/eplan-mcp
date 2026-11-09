@@ -193,12 +193,31 @@ _HELPERS_CABLE = r'''
     // symbol pin's.
     static string PinDesignation(object sr, object pin)
     {
+        // A cable's plug connector (XBD2 / XSD2 tagged with the cable): its
+        // pin is named "XD1:n" / "XD2:n" and n is the sensor pin; the pin's
+        // Designation is the symbol's own "1" (measured 2026-11-09).
+        string pn = pin == null ? "" : (PropText(pin, "Name") ?? "");
+        if (pn.StartsWith("XD") && pn.IndexOf(':') > 2 && pn.LastIndexOf(':') < pn.Length - 1) return pn.Substring(pn.LastIndexOf(':') + 1);
         string n = sr == null ? "" : (PropText(sr, "Name") ?? "");
         int c = n.LastIndexOf(':');
         if (c >= 0 && c < n.Length - 1) return n.Substring(c + 1);
         object props = sr == null ? null : TryRead(sr, "Properties", null);
         string fcd = props == null ? null : PropText(props, "FUNC_CONNECTIONDESIGNATION");
-        if (!string.IsNullOrEmpty(fcd)) { int nl = fcd.IndexOf('\n'); return nl > 0 ? fcd.Substring(0, nl) : fcd; }
+        if (!string.IsNullOrEmpty(fcd))
+        {
+            // A cable's plug connector (XBD2 / XSD2 tagged with the cable)
+            // carries "XD1:n" / "XD2:n": n is the sensor pin. Its first
+            // line is the symbol's own "1" - taken as the pin, every
+            // conductor of a plugged hose came out BN (P26009 recipe,
+            // 2026-11-09).
+            foreach (string ln in fcd.Split('\n'))
+            {
+                string l = ln.Trim();
+                int k = l.LastIndexOf(':');
+                if (l.StartsWith("XD") && k > 2 && k < l.Length - 1) return l.Substring(k + 1);
+            }
+            int nl = fcd.IndexOf('\n'); return nl > 0 ? fcd.Substring(0, nl) : fcd;
+        }
         return pin == null ? "" : (PropText(pin, "Designation") ?? "");
     }
 '''
@@ -352,6 +371,33 @@ def _recreate_line(page: str, handle: str, allow_real_project: bool, timeout_sec
         pass
     res = r.get("results") if isinstance(r.get("results"), dict) else r
     return res if isinstance(res, dict) else {"success": False, "error": str(res)}
+
+
+def _assign_all(page, **kw):
+    """Every cable definition line of a page, one after the other; a brief
+    answer per cable (name, conductors, colours, what went wrong)."""
+    r = schematic.live_read_page(page, include_pins=False, limit=1000, types=["Cable"],
+                                 timeout_seconds=kw.get("timeout_seconds") or 120.0)
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    if not res.get("success"):
+        return {"success": False, "error": res.get("error") or "page read failed"}
+    rows, failed = [], 0
+    for c in res.get("placements") or []:
+        a = live_assign_cable_connections(page, c.get("handle"), **kw)
+        ar = a.get("results") if isinstance(a.get("results"), dict) else a
+        cond = ar.get("conductors") or []
+        row = {"name": c.get("name"), "handle": ar.get("handle") or c.get("handle"),
+               "conductors": len(cond), "colours": "/".join((x.get("colour") or "?") for x in cond)}
+        if ar.get("replacedLine"):
+            row["replacedLine"] = True
+        err = ar.get("error") or ar.get("assignError") or ar.get("reassignError") or ar.get("pinColoursError")
+        if not ar.get("success") or err:
+            row["error"] = err or "failed"
+            failed += 1
+        if ar.get("unplacedConductors"):
+            row["unplaced"] = len(ar["unplacedConductors"])
+        rows.append(row)
+    return {"success": failed == 0, "page": page, "count": len(rows), "failed": failed, "cables": rows}
 
 
 _DROP_BODY = '''
@@ -938,7 +984,11 @@ MAPROWS
                     foreach (string cand in order) if (want == null && map.ContainsKey(cand)) { want = map[cand]; pin = cand; }
                     if (want == null) { d["result"] = "no pin in map"; rows.Add(d); continue; }
                     d["pin"] = pin; d["colour"] = want; d["pinSide"] = pin == pin1 ? "start" : "end";
-                    if ((string)d["before"] == want) { d["result"] = "already"; rows.Add(d); continue; }
+                    // Already right on the conductor: the crossing points may
+                    // still show the old colour (crossing_texts=False leaves
+                    // them alone: every point of a plugged hose read BN, P26009
+                    // recipe 2026-11-09) - so the points are synced either way.
+                    bool already = (string)d["before"] == want;
                     LockHard(cc); LockHard(sr1); LockHard(sr2);
                     // the colour write goes through to the connection's own
                     // definition points: lock them first (pin 1 of P26009
@@ -946,7 +996,8 @@ MAPROWS
                     object dps0 = TryRead(cc, "ConnectionDefPoints", null);
                     if (dps0 != null) foreach (object q in (IEnumerable)dps0) if (q != null) LockHard(q);
                     int written = 0;
-                    try { SetProp(cp, "CONNECTION_WIRENUMBER", want); written++; } catch (Exception e1) { d["connectionError"] = Flatten(e1); }
+                    if (already) written++;
+                    else { try { SetProp(cp, "CONNECTION_WIRENUMBER", want); written++; } catch (Exception e1) { d["connectionError"] = Flatten(e1); } }
                     // the connection definition points on this wire (the
                     // rotulo and the line crossing) define the colour too
                     object l1 = sr1 == null ? null : TryRead(sr1, "Location", null), l2 = sr2 == null ? null : TryRead(sr2, "Location", null);
@@ -967,11 +1018,13 @@ MAPROWS
                                 ? (Math.Abs(lx - x1) < 0.05 && ly >= Math.Min(y1, y2) - 0.05 && ly <= Math.Max(y1, y2) + 0.05)
                                 : (Math.Abs(y1 - y2) < 0.01 && Math.Abs(ly - y1) < 0.05 && lx >= Math.Min(x1, x2) - 0.05 && lx <= Math.Max(x1, x2) + 0.05);
                             if (!on) continue;
-                            try { LockHard(pl); SetProp(TryRead(pl, "Properties", null), "CONNECTION_WIRENUMBER", want); cdps++; } catch (Exception e2) { d["cdpError"] = Flatten(e2); }
+                            object plp = TryRead(pl, "Properties", null);
+                            if ((PropText(plp, "CONNECTION_WIRENUMBER") ?? "") == want) continue;
+                            try { LockHard(pl); SetProp(plp, "CONNECTION_WIRENUMBER", want); cdps++; } catch (Exception e2) { d["cdpError"] = Flatten(e2); }
                         }
                         d["pointsWritten"] = cdps;
                     }
-                    d["result"] = written > 0 ? "set" : "failed";
+                    d["result"] = already ? (d.ContainsKey("pointsWritten") && (int)d["pointsWritten"] > 0 ? "points" : "already") : (written > 0 ? "set" : "failed");
                     if (written == 0) errors.Add((string)d["designation"] + ": " + d["connectionError"]);
                 }
                 catch (Exception e) { d["error"] = Flatten(e); errors.Add(Flatten(e)); }
@@ -1132,6 +1185,10 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
     Make the connections a cable definition line crosses its conductors.
     WRITES - scratch-only by default.
 
+    cable="all" does every cable definition line of the page in one call
+    and answers briefly: {"success", "count", "failed", "cables": [{name,
+    handle, conductors (n), colours ("BN/BK/BU"), error?}]}.
+
     A line placed by the API (or moved afterwards) crosses wires that EPLAN
     does not assign to it on its own; this does what drawing the line in the
     GUI does: every connection on the page whose run straddles the line gets
@@ -1188,6 +1245,12 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         cable = cs_text(cable, "cable")
     except SchematicValueError as exc:
         return _err(exc)
+    if cable.strip().lower() in ("all", "*"):
+        return _assign_all(page, generate=generate, reassign_from_part=reassign_from_part,
+                           crossing_texts=crossing_texts, crossing_style=crossing_style,
+                           pin_colours=pin_colours, extra_points=extra_points,
+                           drop_unplaced=drop_unplaced, allow_real_project=allow_real_project,
+                           timeout_seconds=timeout_seconds)
     def _run(reassign, inline=False):
         tail = (_INLINE_TAIL.replace("GENERATE", "true") if inline else _REASSIGN_TAIL)
         body = (_guard_prelude(allow_real_project)
