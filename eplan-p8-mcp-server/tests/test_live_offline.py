@@ -1382,18 +1382,139 @@ def test_window_macro_inserts_lock_the_whole_page_first(monkeypatch):
     assert cs.index("LockTree(page);\n            foreach (object pl0") < cs.index("wm6.Invoke(ins")
 
 
-def test_nested_functions_follow_their_box(monkeypatch):
-    # a DCP pin inside a black box composes its name from the box: writing
-    # the full name into it doubles the code ("-B17-B17:1", P26009 /13), so
-    # copy_region and the structure box leave nested functions' names alone
+def test_black_box_pins_follow_their_box(monkeypatch):
+    # a DCP pin keeps only ":n" as its name: the box supplies the DT and the
+    # pin follows every retag; a pin with a code of its own is nested and
+    # shown twice ("-B17-B17:1", P26009 /13). Measured 2026-11-09.
     from api.actions import ops, copy_live
     h = ops._OPS_HELPERS
-    assert "static string NestedCodeOf(object o)" in h
-    assert 'if (NestedCodeOf(o) != "") continue;   // a pin inside a black box follows the box' in h
+    assert "static bool PinFollowBox(object o)" in h and "static List<object> PinsOfBox(object page, object box, HashSet<string> limitTo)" in h
+    assert 'GetWritable(o.GetType(), "Name").SetValue(o, want, null);' in h
+    macro = h[h.index("static void OpMacro"):h.index("static void OpUpdate")]
+    assert "foreach (object pn in PinsOfBox(page, o, own)) { try { PinFollowBox(pn); } catch { } following.Add(Handle(pn)); }" in macro
+    assert 'if (following.Contains(Handle(o))) { JObject a2 = (JObject)a.DeepClone(); a2.Remove("tag");' in macro
+    upd = h[h.index("static void OpUpdate"):h.index("static void OpMove")]
+    assert upd.index("PinsFollow(page, fn, null, r);") < upd.index("Finish(project, page, fn, a, r);")
+    assert 'if (B(a, "pinFollow", false)) r["pinFollow"] = PinFollowBox(fn);' in upd
+    sbox = h[h.index("static void OpStructureBox"):h.index("static void OpMacro")]
+    assert "foreach (object pn in PinsOfBox(page, o, null)) { try { if (PinFollowBox(pn)) followed++; } catch { } followers.Add(Handle(pn)); }" in sbox
+    assert "if (followers.Contains(Handle(o))) continue;" in sbox
     scripts = []
     monkeypatch.setattr(copy_live, "_execute_script",
                         lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}})
     copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename={"=ST2": "=ST3"})
     cs = scripts[-1]
     assert _string_literals_balanced(cs)
-    assert 'if (nn != n && nestedCode == "")' in cs and 'if (vn != "" && vnn != vn && nestedCode == "")' in cs
+    assert 'GetWritable(o.GetType(), "Name").SetValue(o, pn.Substring(c), null); pinsFollow++;' in cs
+    assert cs.index('results["pinsFollow"] = pinsFollow;') < cs.index('if (nn != n && nestedCode == "")')
+    assert 'if (pinFollowers.Contains(Handle(o))) { nestedCode = "pin"; d["follows"] = true; }' in cs
+
+
+def test_remove_op_locks_the_group_chain():
+    # removing one object of an inserted macro threw LockingException on
+    # the macro's group (P26009 =MOV+CAMPO/13): the groups above are locked
+    from api.actions import ops
+    h = ops._OPS_HELPERS
+    assert "static void LockWithGroups(object o)" in h
+    assert 'object g = TryRead(t, "Group", null);' in h.split("static void LockWithGroups(object o)")[1].split("static void RemoveObject")[0]
+    assert "foreach (object o in targets) { LockWithGroups(o); RemoveObject(o); }" in h
+    assert "try { LockWithGroups(o); } catch { }" in h
+
+
+def test_assign_reports_and_drops_unplaced_conductors(monkeypatch):
+    # a conductor whose connection is no longer placed is stale (P26009 /13
+    # kept the old B17 -> A30.4 conductors after a Y box was wired in)
+    from api.actions import cables_live, generate
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 2,
+                            "conductors": [{"handle": "1/18/1/0", "placed": True, "source": "a", "target": "b"},
+                                           {"handle": "1/18/2/0", "placed": False, "source": "c", "target": "old"}],
+                            "crossed": [{"assigned": "now"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"handle": "1/18/1/0", "placed": True}]}]}})
+    dropped = []
+    real_drop = cables_live._drop_connections
+    monkeypatch.setattr(cables_live, "_drop_connections",
+                        lambda page, handles, allow, timeout: dropped.append(handles) or {"success": True, "removed": len(handles)})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    res = r["results"]
+    assert res["unplacedConductors"] == [{"handle": "1/18/2/0", "source": "c", "target": "old", "colour": None}]
+    assert dropped == [] and "droppedConductors" not in res and len(res["conductors"]) == 2
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False,
+                                                  drop_unplaced=True)
+    res = r["results"]
+    assert dropped == [["1/18/2/0"]] and res["droppedConductors"] == 1 and len(res["conductors"]) == 1
+    # the drop script itself: only unplaced connections of the given handles go
+    scripts.clear()
+    real_drop("+CE/2", ["1/18/2/0"], False, 60)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'new string[] { "1/18/2/0" }' in cs and 'errors.Add(Handle(cn) + ": still placed, not removed"); continue;' in cs
+    # the conductor readers carry handle + placed
+    assert 'cd["handle"] = Handle(c);' in cables_live._CABLE_DICT and 'cd["placed"] = (bool)ip;' in cables_live._HELPERS_CABLE
+
+
+def test_assign_rebuilds_connections_when_a_pin_feeds_two_conductors(monkeypatch):
+    # a stale logical connection after rewiring: B17:1 -> A30.4:1 next to
+    # B17:1 -> X17:1 (P26009 /13); only a rebuild_all drops it
+    from api.actions import cables_live, generate
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 2,
+                            "conductors": [{"handle": "1", "placed": True, "source": "=B17:1", "target": "=A30:1"},
+                                           {"handle": "2", "placed": True, "source": "=B17:1", "target": "=X17:1"}],
+                            "crossed": [{"assigned": "now"}]}})
+    calls = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: calls.append(kw) or {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"handle": "2", "placed": True, "source": "=B17:1", "target": "=X17:1"}]}]}})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    res = r["results"]
+    assert res["rebuiltFor"] == ["=B17:1"] and any(kw.get("rebuild_all") for kw in calls) and len(res["conductors"]) == 1
+    assert res["connectionsGenerated"] == 3
+
+
+def test_page_description_on_create_and_setter(monkeypatch):
+    # the page description is PagePropertyList.PAGE_NOMINATIOMN (11011),
+    # written after Page.Create since it is not name-forming
+    from api.actions import schematic, live
+    scripts = []
+    monkeypatch.setattr(schematic, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True, "page": "+CE/9"}})
+    schematic.live_create_page(location="CE", counter=9, description="es_ES@Entradas digitales;en_US@Digital inputs;")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'SetProp(pprops, "PAGE_NOMINATIOMN", "es_ES@Entradas digitales;en_US@Digital inputs;");' in cs
+    assert cs.index('Call(create, page, new object[] { project, docType, ppl });') < cs.index('"PAGE_NOMINATIOMN"')
+    schematic.live_create_page(location="CE", counter=9)
+    assert "if (null != null)" in scripts[-1]
+    r = schematic.live_set_page_description("+CE/9", "Digital inputs")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs) and 'SetProp(pprops, "PAGE_NOMINATIOMN", "Digital inputs");' in cs
+    assert 'results["before"] = PropText(pprops, "PAGE_NOMINATIOMN");' in cs
+    monkeypatch.setattr(live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    live.live_query_pages()
+    assert 'PropText(pp0, "PAGE_NOMINATIOMN")' in scripts[-1]
+
+
+def test_update_parts_replace_remove_and_nested_follow(monkeypatch):
+    from api.actions import ops, copy_live
+    h = ops._OPS_HELPERS
+    assert "static void SetParts(object fn, JArray wanted, Dictionary<string, object> r)" in h
+    assert 'MethodInfo rm = fn.GetType().GetMethod("RemoveArticleReference");' in h
+    assert 'if (Has(a, "parts")) SetParts(fn, (JArray)a["parts"], r);' in h
+    assert 'if (Has(a, "removePart")) RemoveParts(fn, a["removePart"], r);' in h
+    assert 'if (Has(a, "tag") && fn.GetType().Name == "BoxedDevice" && B(a, "nestedFollow", true)) PinsFollow(page, fn, null, r);' in h
+    # no NameParts assignment on freshly inserted pins (that closed EPLAN)
+    assert "ClearOwnCode" not in h and "NestedFollow(" not in h
+    scripts = []
+    monkeypatch.setattr(copy_live, "_execute_script",
+                        lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}})
+    copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename={"=ST2": "=ST3"})
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "ownCodeCleared" not in cs

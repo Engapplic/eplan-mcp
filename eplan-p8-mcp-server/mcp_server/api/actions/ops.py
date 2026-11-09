@@ -354,6 +354,103 @@ _OPS_HELPERS = r'''
         r["name"] = PropText(fn, "Name");
     }
 
+    // "parts": the whole list the device should end with - references not
+    // in it are removed, missing ones added ("part" only ADDS, so a second
+    // call left SMC + SICK on one sensor, P26009 =MOV+CAMPO/13, 2026-11-09).
+    static void SetParts(object fn, JArray wanted, Dictionary<string, object> r)
+    {
+        HashSet<string> want = new HashSet<string>();
+        foreach (JToken t in wanted) { string s0 = (string)t; if (!string.IsNullOrEmpty(s0)) want.Add(s0); }
+        List<string> removed = new List<string>(), added = new List<string>();
+        MethodInfo rm = fn.GetType().GetMethod("RemoveArticleReference");
+        List<object> refs = new List<object>();
+        object ars = TryRead(fn, "ArticleReferences", null);
+        if (ars != null) foreach (object ar in (IEnumerable)ars) if (ar != null) refs.Add(ar);
+        HashSet<string> have = new HashSet<string>();
+        foreach (object ar in refs)
+        {
+            string pn = PropText(ar, "PartNr") ?? "";
+            if (want.Contains(pn)) { have.Add(pn); continue; }
+            if (rm == null) throw new Exception("Function has no RemoveArticleReference.");
+            Call(rm, fn, new object[] { ar }); removed.Add(pn);
+        }
+        foreach (string w in want) if (!have.Contains(w)) { Dictionary<string, object> tmp = new Dictionary<string, object>(); AddPart(fn, w, tmp); added.Add(w); }
+        r["partsRemoved"] = removed; r["partsAdded"] = added;
+        List<string> now = new List<string>();
+        object ars2 = TryRead(fn, "ArticleReferences", null);
+        if (ars2 != null) foreach (object ar in (IEnumerable)ars2) if (ar != null) now.Add(PropText(ar, "PartNr") ?? "");
+        r["parts"] = now;
+    }
+
+    // "removePart": one part number or a list of them
+    static void RemoveParts(object fn, JToken which, Dictionary<string, object> r)
+    {
+        HashSet<string> drop = new HashSet<string>();
+        if (which.Type == JTokenType.Array) { foreach (JToken t in (JArray)which) drop.Add((string)t); } else drop.Add((string)which);
+        MethodInfo rm = fn.GetType().GetMethod("RemoveArticleReference");
+        if (rm == null) throw new Exception("Function has no RemoveArticleReference.");
+        List<string> removed = new List<string>(); List<object> refs = new List<object>();
+        object ars = TryRead(fn, "ArticleReferences", null);
+        if (ars != null) foreach (object ar in (IEnumerable)ars) if (ar != null) refs.Add(ar);
+        foreach (object ar in refs) { string pn = PropText(ar, "PartNr") ?? ""; if (drop.Contains(pn)) { Call(rm, fn, new object[] { ar }); removed.Add(pn); } }
+        r["partsRemoved"] = removed;
+    }
+
+    // A black-box pin (DCP) must carry ONLY its connection designation as
+    // its name (":1"): EPLAN then shows the box's DT in front of it and the
+    // pin follows every retag of the box. A pin with a device code of its
+    // own - the sensor macros ship "-BG1:1", and a tag written into the pin
+    // gives "-B17:1" - is a different device for EPLAN once the box is
+    // renamed: it is nested and shown twice ("-B17-B17:1", "-B19-B17:1" on
+    // P26009 =MOV+CAMPO/13). Measured 2026-11-09: writing ":1" cures even a
+    // pin that is already nested. Terminals are left alone (their strip is
+    // their device).
+    static bool PinFollowBox(object o)
+    {
+        if (o == null || o.GetType().Name != "Function") return false;
+        string n = PropText(o, "Name") ?? "";
+        int c = n.LastIndexOf(':');
+        if (c < 0) return false;
+        string want = n.Substring(c);
+        object np = TryRead(o, "NameParts", null);
+        string code = np == null ? "" : (PropText(np, "FUNC_CODE") ?? ""), nested = np == null ? "" : (PropText(np, "FUNC_NESTEDCODE") ?? "");
+        if (code == "" && nested == "") return false;          // already a bare ":n"
+        try { Lock(o); } catch { }
+        GetWritable(o.GetType(), "Name").SetValue(o, want, null);
+        return true;
+    }
+
+    // The pins that sit inside a box: Function.NestedFunctions plus every
+    // Function with a ":" in its name whose location lies in the box's area.
+    static List<object> PinsOfBox(object page, object box, HashSet<string> limitTo)
+    {
+        List<object> pins = new List<object>(); HashSet<string> seen = new HashSet<string>(); string me = Handle(box);
+        object nf = TryRead(box, "NestedFunctions", null);
+        if (nf != null) foreach (object f in (IEnumerable)nf) if (f != null && (limitTo == null || limitTo.Contains(Handle(f))) && seen.Add(Handle(f))) pins.Add(f);
+        double[] bb = null; try { bb = BBoxOf(box); } catch { }
+        if (bb == null) return pins;
+        foreach (object pl in PagePlacements(page))
+        {
+            if (pl == null || Handle(pl) == me || pl.GetType().Name != "Function") continue;
+            if (limitTo != null && !limitTo.Contains(Handle(pl))) continue;
+            if ((PropText(pl, "Name") ?? "").IndexOf(':') < 0) continue;
+            object lo = TryRead(pl, "Location", null); if (lo == null) continue;
+            Dictionary<string, object> ld = PtDict(lo);
+            double ox = Convert.ToDouble(ld["x"]), oy = Convert.ToDouble(ld["y"]);
+            if (ox < bb[0] - 0.01 || ox > bb[2] + 0.01 || oy < bb[1] - 0.01 || oy > bb[3] + 0.01) continue;
+            if (seen.Add(Handle(pl))) pins.Add(pl);
+        }
+        return pins;
+    }
+
+    static int PinsFollow(object page, object box, HashSet<string> limitTo, Dictionary<string, object> r)
+    {
+        int n = 0;
+        foreach (object p in PinsOfBox(page, box, limitTo)) { try { if (PinFollowBox(p)) n++; } catch (Exception e) { r["pinsFollowError"] = Flatten(e); } }
+        if (n > 0) r["pinsFollow"] = n;
+        return n;
+    }
+
     static void AddPart(object fn, string part, Dictionary<string, object> r)
     {
         object ars = TryRead(fn, "ArticleReferences", null);
@@ -613,13 +710,33 @@ _OPS_HELPERS = r'''
         return objs;
     }
 
+    // Lock the object, everything under it and every group above it
+    // (LockObject + SmartLock). Removing one object of an inserted macro
+    // threw LockingException on the macro's GROUP (124/26/37157/0, P26009
+    // =MOV+CAMPO/13, 2026-11-09): the parent group must be locked too.
+    static void LockWithGroups(object o)
+    {
+        if (o == null) return;
+        LockDeep(o);
+        try { MethodInfo sm = o.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(o, null); } catch { }
+        object t = o;
+        for (int guard = 0; guard < 20; guard++)
+        {
+            object g = TryRead(t, "Group", null);
+            if (g == null || PropText(g, "IsValid") == "False") break;
+            try { Lock(g); } catch { }
+            try { MethodInfo sm = g.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(g, null); } catch { }
+            t = g;
+        }
+    }
+
     static void RemoveObject(object o)
     {
         if (o == null) return;
         if (PropText(o, "IsValid") == "False") return;
         // A locked Group removes itself with its contents (measured); only
         // if that fails are the sub-placements removed one by one.
-        try { Lock(o); } catch { }
+        try { LockWithGroups(o); } catch { }
         try
         {
             Call(RequireMethod(o.GetType(), "Remove", new string[] { }, false), o, new object[] { });
@@ -735,10 +852,23 @@ _OPS_HELPERS = r'''
             string me = Handle(lb);
             List<object> devs = new List<object>();
             foreach (object pl in PagePlacements(page)) if (pl != null && Handle(pl) != me) CollectDevices(pl, devs);
+            // the pins of a black box inside the area keep ":n" and follow
+            // their box, which is renamed below
+            HashSet<string> followers = new HashSet<string>(); int followed = 0;
+            foreach (object o in devs)
+            {
+                if (o.GetType().Name != "BoxedDevice") continue;
+                object blo = TryRead(o, "Location", null); if (blo == null) continue;
+                Dictionary<string, object> bl = PtDict(blo);
+                double bxx = Convert.ToDouble(bl["x"]), byy = Convert.ToDouble(bl["y"]);
+                if (bxx < bx0 || bxx > bx1 || byy < by0 || byy > by1) continue;
+                foreach (object pn in PinsOfBox(page, o, null)) { try { if (PinFollowBox(pn)) followed++; } catch { } followers.Add(Handle(pn)); }
+            }
+            if (followed > 0) r["pinsFollow"] = followed;
             foreach (object o in devs)
             {
                 if (o.GetType().Name == "LocationBox") continue;
-                if (NestedCodeOf(o) != "") continue;   // a pin inside a black box follows the box
+                if (followers.Contains(Handle(o))) continue;
                 object lo = TryRead(o, "Location", null);
                 if (lo == null) continue;
                 Dictionary<string, object> ld = PtDict(lo);
@@ -816,8 +946,23 @@ _OPS_HELPERS = r'''
         string first = null;
         List<object> devObjs = new List<object>();
         foreach (object o in objs) { if (o != null) handles.Add(Handle(o)); CollectDevices(o, devObjs); }
+        // The box FIRST: a pin tagged "-B17" while its box still reads the
+        // macro's "-BG1" is a different device, so EPLAN nests it and shows
+        // "-B17-B17:1" once the box is tagged too (P26009 /13, 2026-11-09).
+        // Tagged after the box, the pins share its DT and nothing nests.
+        List<object> boxesFirst = new List<object>();
+        foreach (object o in devObjs) if (o.GetType().Name == "BoxedDevice") boxesFirst.Add(o);
+        foreach (object o in devObjs) if (o.GetType().Name != "BoxedDevice") boxesFirst.Add(o);
+        devObjs = boxesFirst;
         HashSet<string> own = new HashSet<string>();
         foreach (object o in devObjs) own.Add(Handle(o));
+        // the pins inside the macro's boxes keep only ":n" and follow the
+        // box's tag; they are not tagged themselves
+        HashSet<string> following = new HashSet<string>();
+        if (Has(a, "tag"))
+            foreach (object o in devObjs) if (o.GetType().Name == "BoxedDevice")
+                foreach (object pn in PinsOfBox(page, o, own)) { try { PinFollowBox(pn); } catch { } following.Add(Handle(pn)); }
+        if (following.Count > 0) r["pinsFollow"] = following.Count;
         // The part goes on the main functions only (a PLC card: the box, not
         // its 20 terminals); with no main function among them, on the first.
         bool anyMain = false;
@@ -829,7 +974,8 @@ _OPS_HELPERS = r'''
             d["handle"] = Handle(o);
             d["clrType"] = o.GetType().Name;
             bool withPart = anyMain ? IsMainFunction(o) : Handle(o) == first;
-            Finish(project, page, o, a, d, own, withPart);
+            if (following.Contains(Handle(o))) { JObject a2 = (JObject)a.DeepClone(); a2.Remove("tag"); d["follows"] = true; Finish(project, page, o, a2, d, own, withPart); }
+            else Finish(project, page, o, a, d, own, withPart);
             d["name"] = PropText(o, "Name");
             object fd = TryRead(o, "FunctionDefinition", null);
             if (fd != null) d["functionDefinitionName"] = PropText(fd, "Name");
@@ -854,7 +1000,15 @@ _OPS_HELPERS = r'''
         object fn = Resolve(page, Req(a, "ref"), labels);
         Lock(fn);
         r["handle"] = Handle(fn);
+        // a retagged box drags its pins along: they are reduced to ":n"
+        // BEFORE the box gets its new tag (default; nestedFollow=false skips)
+        if (Has(a, "tag") && fn.GetType().Name == "BoxedDevice" && B(a, "nestedFollow", true)) PinsFollow(page, fn, null, r);
         Finish(project, page, fn, a, r);
+        if (Has(a, "parts")) SetParts(fn, (JArray)a["parts"], r);
+        if (Has(a, "removePart")) RemoveParts(fn, a["removePart"], r);
+        // a retagged box drags its nested pins along (default); clearOwnCode
+        // repairs one pin by itself
+        if (B(a, "pinFollow", false)) r["pinFollow"] = PinFollowBox(fn);   // repair one pin by itself
         r["placed"] = DumpPlacement(fn, false);
     }
 
@@ -911,7 +1065,8 @@ _OPS_HELPERS = r'''
         if (refs.Count == 0) throw new Exception("'ref' or 'refs' is required.");
         List<object> targets = new List<object>();
         foreach (string rf in refs) targets.Add(Resolve(page, rf, labels));
-        foreach (object o in targets) { Lock(o); RemoveObject(o); }
+        try { Lock(page); } catch { }
+        foreach (object o in targets) { LockWithGroups(o); RemoveObject(o); }
         r["removed"] = targets.Count;
     }
 

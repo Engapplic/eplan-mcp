@@ -410,6 +410,7 @@ from .live import (
 from .schematic import (
     live_symbol_catalog,
     live_create_page,
+    live_set_page_description,
     live_place_symbol,
     live_connect_pins,
     live_read_page,
@@ -576,7 +577,7 @@ __all__ = [
     'live_project_templates', 'live_create_project',
     'live_query_functions', 'live_query_pages', 'live_plc_io_list', 'live_set_function_text',
     'live_set_connection_designations', 'live_read_check_messages',
-    'live_symbol_catalog', 'live_create_page', 'live_place_symbol',
+    'live_symbol_catalog', 'live_create_page', 'live_set_page_description', 'live_place_symbol',
     'live_connect_pins', 'live_read_page', 'live_remove_placement',
     'live_verify_page', 'live_set_device_tag', 'live_read_connections',
     'live_connect_pins_routed', 'live_routing_catalog', 'live_place_connection_symbol',

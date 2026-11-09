@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **254 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -52,7 +52,7 @@ It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   redirect a write; set it right after opening the project) and 10 batched
   page-operation tools built on ONE C# interpreter that runs a list of ops per
   script and is registered as an EPLAN action for the session so later
-  batches skip the compile; every tool's JSON is compact, not pretty-printed, edit ops echo only handle / name / location / the values written (`brief`, default) and `eplan_live_remove_placement` is brief by default: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (place / rect / macro / update /
+  batches skip the compile; every tool's JSON is compact, not pretty-printed, edit ops echo only handle / name / location / the values written (`brief`, default) and `eplan_live_remove_placement` is brief by default: `eplan_live_batch` (ops: place, rect, macro, structurebox - a structure box with two corners whose = / + the devices inside take -, update, move, resize - new corners for an existing black box / structure box / PLC box -, remove, dimension, line, text - a free page text, bilingual with "es_ES@..;en_US@..;" -, image - a picture in a rectangle, from a file, a part's ARTICLE_PICTUREFILE or a device's part -, find, read) (update also takes `parts` - the whole part list the device ends with, `part` only ADDS -, `removePart`, and a `tag` on a black box drags its pins along; the DCP pins of a black box keep only ":n" as their name - the box supplies the DT - in macro inserts, structure boxes, copy_region and retags, since a pin with a code of its own is shown twice, "-B17-B17:1"; `pinFollow` repairs one pin) (place / rect / macro / update /
   move / remove / dimension / line / find / read, objects addressed by handle,
   by device tag, or by `$label` of an earlier op), `eplan_live_find_placements`
   (by tag - handles do not survive an EPLAN restart, tags do),
@@ -112,7 +112,10 @@ It exposes **253 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](h
   2 tools and not a wrapper per class - same call as the action catalog
   below, for the same reason. 11 schematic-authoring
   tools on that same reflection scaffold (`eplan_live_symbol_catalog`,
-  `eplan_live_create_page`, `eplan_live_place_symbol`,
+  `eplan_live_create_page` (with `description`: the page description
+  11011 every page should carry - "Digital inputs SMC module" -, also set
+  later with `eplan_live_set_page_description`; `eplan_live_query_pages`
+  lists it), `eplan_live_place_symbol`,
   `eplan_live_connect_pins`, `eplan_live_read_page`,
   `eplan_live_remove_placement`) that CREATE a schematic rather than only
   reading one - every write returns the page read-back as proof and an undo
@@ -347,7 +350,12 @@ All of these exist as `eplan_*` tools:
   for a line placed by hand or moved: EPLAN does not assign conductors to
   an API-placed line on its own; a connection EPLAN linked to the line
   without writing the cable into it is assigned too, and pre-existing
-  connections are locked with retries before the write; when three
+  connections are locked with retries before the write; a source pin that
+  feeds two conductors (a stale logical connection after rewiring) gets
+  one page rebuild of the connections - `rebuiltFor`; a conductor
+  whose connection is no longer placed (stale after rewiring through a new
+  device) is listed in `unplacedConductors` and removed with
+  `drop_unplaced=True`; when three
   updates link nothing the line is stale: its orphan points are removed
   and the line is cloned through a one-object window macro on the same
   wires, full name / part / text arrangement kept - `replacedLine`, the
