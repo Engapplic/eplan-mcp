@@ -957,10 +957,14 @@ def test_remove_placement_brief_mode(monkeypatch):
     schematic.live_remove_placement("+CE/2", handle="1/2/3/0")
     cs = captured["script"]
     assert "true ? PageSummary(page) : ReadPage(page, 200, false, null)" in cs, "brief is the default"
+    assert "LockTree(target);" in cs
     captured.clear()
     schematic.live_remove_placement("+CE/2", remove_page=True, brief=False)
     cs = captured["script"]
     assert "false ? PageSummary(page) : ReadPage(page, 500, false, null)" in cs
+    # the page and everything on it are write-locked first; a stubborn object is cleared one by one
+    assert "LockTree(page);" in cs and "foreach (object pl in PagePlacements(page)) if (pl != null) { LockTree(pl); onPage.Add(pl); }" in cs
+    assert 'results["clearedFirst"] = cleared;' in cs and "static void LockTree(object o)" in cs
 
 
 def test_assign_cable_connections_checks_name_parts_and_locks(monkeypatch):
