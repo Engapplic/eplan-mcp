@@ -1555,10 +1555,13 @@ def test_set_connection_layers_script(monkeypatch):
     assert 'string cableLayer = "311", indLayer = "510";' in cs
     assert 'string want = kind == "Cable" ? cableLayer : indLayer;' in cs
     assert 'SetProp(TryRead(dp, "Properties", null), "CONNECTION_ACL_LAYER", want);' in cs
-    assert "if (RESET && want == indLayer)".replace("RESET", "true") in cs
-    assert 'd["reset"] = true; d["pointsRemoved"] = gone;' in cs
+    assert 'bool inherited = true && kind != "Cable" && cableGroups.Contains(grp);' in cs
+    assert "if (have == want && !inherited) { ok++; continue; }" in cs
+    assert 'GetWritable(cn.GetType(), "FunctionDefinition").SetValue(cn, TryRead(donor, "FunctionDefinition", null), null);' in cs
+    assert 'MakeVariantT(project, "SPECIAL", "CDPNG", 0)' in cs and 'd["definition"] = "direct connection";' in cs
+    assert "Remove" not in cs[cs.index("if (pts.Count == 0)"):cs.index("int written = 0;")], "a removed point does not stick"
     cables_live.live_set_connection_layers("+CE/2", reset_without_point=False)
-    assert "if (false && want == indLayer)" in scripts[-1]
+    assert 'bool inherited = false && kind != "Cable"' in scripts[-1]
     assert r["results"]["connectionsGenerated"] is True and gens[0]["page_name"] == "+CE/2"
     assert cables_live.live_set_connection_layers("+CE/2", cable_layer="x")["success"] is False
 
@@ -1833,3 +1836,33 @@ def test_parts_db_get_part_brief_drops_languages_and_links(monkeypatch):
     assert part["Properties"] == {"ARTICLE_NOTE": "es_ES@b;", "ARTICLE_CABLEWIRECOUNT": "5"}
     full = scripted.parts_db_get_part("FES.1", brief=False)["results"]["part"]
     assert "ARTICLE_EXTERNAL_DOCUMENT_1" in full["Properties"]
+
+
+def test_connector_recipe_stops_when_eplan_does_not_answer(monkeypatch):
+    from api.actions import recipes_live, schematic, generate, cables_live
+    monkeypatch.setattr(schematic, "live_read_page", lambda pg, **kw: {"success": True, "placements": _fij10_column()})
+    sent = []
+    monkeypatch.setattr(recipes_live, "run_ops", lambda pg, ops_, **kw: sent.append(len(ops_)) or {
+        "success": True, "ops": [{"index": i, "op": o["op"], "success": True} for i, o in enumerate(ops_)], "failed": 0})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": False, "errorType": "McpScriptNoResult",
+                                                                         "error": "no result file appeared within 30s"})
+    later = []
+    monkeypatch.setattr(cables_live, "live_assign_cable_connections", lambda *a, **k: later.append("assign") or {"success": True})
+    out = recipes_live.live_apply_connector_recipe("=FIJ+CAMPO/10")
+    assert out["success"] is False and out["aborted"] == "rebuild" and later == []
+    assert "rest of the recipe was not sent" in out["error"] and len(sent) == 2
+    assert all("seconds" in s for s in out["steps"].values())
+    assert recipes_live.live_apply_connector_recipe.__defaults__[-1] == 180.0
+
+
+def test_copy_pages_to_structure_warns_about_structure_boxes(monkeypatch):
+    from api.actions import structure_live
+    scripts = []
+    monkeypatch.setattr(structure_live, "_execute_script", lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {
+        "success": True, "copies": [{"source": "=FIJ+CAMPO/10", "newPage": "=TST+CAMPO/10", "retagged": 137,
+                                     "structureBoxes": ["=ST1+CAMPO"], "warning": "The page has structure boxes"}]}})
+    r = structure_live.live_copy_pages_to_structure(["=FIJ+CAMPO/10"], ["TST"])
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'pl.GetType().Name == "LocationBox"' in cs and 'c["structureBoxes"] = boxes;' in cs
+    assert r["results"]["warnings"] == ["=FIJ+CAMPO/10 -> =TST+CAMPO/10: The page has structure boxes"]

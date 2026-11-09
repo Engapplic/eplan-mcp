@@ -1784,21 +1784,79 @@ _LAYERS_BODY = '''
             List<Dictionary<string, object>> changed = new List<Dictionary<string, object>>(), noPoint = new List<Dictionary<string, object>>();
             List<string> errors = new List<string>(); int seen = 0, ok = 0;
             LockAny(page);
-            foreach (object cn in (IEnumerable)gc.Invoke(finder, new object[] { cf }))
+            // The page's connections, and the function definition group of its
+            // cable conductors: an INDIVIDUAL connection that carries that same
+            // group inherited it from a wire that used to run through to the
+            // cable (P26009 FIJ/10: sensor -> XD1 stubs, "Conductor/cable").
+            List<object> pageConns = new List<object>();
+            foreach (object c0 in (IEnumerable)gc.Invoke(finder, new object[] { cf }))
             {
-                if (cn == null) continue;
-                object pg = TryRead(cn, "Page", null);
-                if (pg == null || PropText(pg, "Name") != "PAGENAME") continue;
+                if (c0 == null) continue;
+                object pg0 = TryRead(c0, "Page", null);
+                if (pg0 != null && PropText(pg0, "Name") == "PAGENAME") pageConns.Add(c0);
+            }
+            HashSet<string> cableGroups = new HashSet<string>();
+            object donor = null;   // a plain individual connection: its definition is "Conexión directa"
+            foreach (object c0 in pageConns)
+            {
+                string k0 = Convert.ToString(TryRead(c0, "KindOfWire", null));
+                string g0 = PropText(TryRead(c0, "Properties", null), "FUNC_CATEGORY_GROUP_ID") ?? "";
+                if (k0 == "Cable" && g0 != "") cableGroups.Add(g0);
+            }
+            foreach (object c0 in pageConns)
+            {
+                string k0 = Convert.ToString(TryRead(c0, "KindOfWire", null));
+                string g0 = PropText(TryRead(c0, "Properties", null), "FUNC_CATEGORY_GROUP_ID") ?? "";
+                if (k0 != "Cable" && g0 != "" && !cableGroups.Contains(g0) && TryRead(c0, "FunctionDefinition", null) != null) { donor = c0; break; }
+            }
+            foreach (object cn in pageConns)
+            {
                 seen++;
                 string kind = Convert.ToString(TryRead(cn, "KindOfWire", null));
                 string want = kind == "Cable" ? cableLayer : indLayer;
                 object props = TryRead(cn, "Properties", null);
                 string have = props == null ? "" : (PropText(props, "CONNECTION_ACL_LAYER") ?? "");
-                if (have == want) { ok++; continue; }
+                string grp = PropText(props, "FUNC_CATEGORY_GROUP_ID") ?? "";
+                // an individual connection that inherited the cable conductor's
+                // definition is wrong whatever its layer reads (a point carrying
+                // 510 still drew red on P26009 FIJ/10, 117/18/6895)
+                bool inherited = FIXDEF && kind != "Cable" && cableGroups.Contains(grp);
+                if (have == want && !inherited) { ok++; continue; }
                 Dictionary<string, object> d = new Dictionary<string, object>();
                 d["handle"] = Handle(cn); d["kind"] = kind; d["from"] = have; d["to"] = want;
                 object sr1 = TryRead(cn, "StartSymbolReference", null), sr2 = TryRead(cn, "EndSymbolReference", null);
                 d["source"] = sr1 == null ? "" : (PropText(sr1, "Name") ?? ""); d["target"] = sr2 == null ? "" : (PropText(sr2, "Name") ?? "");
+                if (inherited)
+                {
+                    if (donor == null) { d["why"] = "no plain individual connection on the page to copy a definition from"; noPoint.Add(d); continue; }
+                    try
+                    {
+                        LockHard(cn);
+                        GetWritable(cn.GetType(), "FunctionDefinition").SetValue(cn, TryRead(donor, "FunctionDefinition", null), null);
+                        int hidden = 0;
+                        object dps2 = TryRead(cn, "ConnectionDefPoints", null);
+                        if (dps2 != null) foreach (object dp in (IEnumerable)dps2)
+                        {
+                            if (dp == null) continue;
+                            LockHard(dp);
+                            object osv = TryRead(dp, "SymbolVariant", null); object osy = osv == null ? null : TryRead(osv, "Parent", null);
+                            if (osy == null || (PropText(osy, "Name") ?? "") != "CDPNG")
+                            {
+                                object sv = MakeVariantT(project, "SPECIAL", "CDPNG", 0);
+                                MethodInfo ssv = null;
+                                foreach (MethodInfo m in dp.GetType().GetMethods()) if (m.Name == "SetSymbolVariant" && m.GetParameters().Length == 2) ssv = m;
+                                if (ssv != null) ssv.Invoke(dp, new object[] { sv, false });
+                                else GetWritable(dp.GetType(), "SymbolVariant").SetValue(dp, sv, null);
+                                hidden++;
+                            }
+                            try { SetProp(TryRead(dp, "Properties", null), "CONNECTION_ACL_LAYER", want); } catch { }
+                        }
+                        d["definition"] = "direct connection"; d["pointsNoGraphic"] = hidden;
+                        changed.Add(d);
+                    }
+                    catch (Exception e) { errors.Add(Handle(cn) + ": " + Flatten(e)); noPoint.Add(d); }
+                    continue;
+                }
                 // the layer lives on the connection definition point(s): a
                 // connection without one is drawn on the default layer, and
                 // writing into it would CREATE a visible point - so it is
@@ -1808,29 +1866,11 @@ _LAYERS_BODY = '''
                 if (dps != null) foreach (object dp in (IEnumerable)dps) if (dp != null) pts.Add(dp);
                 if (pts.Count == 0)
                 {
-                    // No point, wrong layer (the stale 311 of a stub that used
-                    // to be part of a cable connection, P26009 FIJ/10). The
-                    // layer cannot be written without creating a visible
-                    // point - but REMOVING a point resets the connection to
-                    // the default layer (measured: 311 -> point removed ->
-                    // 510). So: write, then remove what the write created.
-                    if (RESET && want == indLayer)
-                    {
-                        try
-                        {
-                            LockHard(cn);
-                            SetProp(props, "CONNECTION_ACL_LAYER", want);
-                            List<object> made = new List<object>();
-                            object dps2 = TryRead(cn, "ConnectionDefPoints", null);
-                            if (dps2 != null) foreach (object dp in (IEnumerable)dps2) if (dp != null) made.Add(dp);
-                            int gone = 0;
-                            foreach (object dp in made) { try { LockHard(dp); dp.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(dp, null); gone++; } catch (Exception re) { errors.Add(Handle(dp) + ": " + Flatten(re)); } }
-                            d["reset"] = true; d["pointsRemoved"] = gone;
-                            changed.Add(d);
-                        }
-                        catch (Exception e) { errors.Add(Handle(cn) + ": " + Flatten(e)); noPoint.Add(d); }
-                    }
-                    else noPoint.Add(d);
+                    // No point to write the layer on, and nothing inherited
+                    // (that case is handled above): writing the layer here
+                    // would only create a point the next connection update
+                    // overrules (measured on a copy of P26009, 2026-11-09).
+                    noPoint.Add(d);
                     continue;
                 }
                 int written = 0;
@@ -1867,14 +1907,17 @@ def live_set_connection_layers(page: str, cable_layer: int = 311, individual_lay
     connection of the page that has a definition point and runs a
     connection update so the lines redraw.
 
-    A connection WITHOUT a definition point that carries the wrong layer
-    (the stale cable layer of a stub that used to belong to a cable
-    connection) cannot be written without creating a visible point, but
-    removing a point resets the connection to the default layer: with
-    reset_without_point (default) the wanted individual layer is written
-    and the point that write created is removed at once ("reset": True in
-    "changed"). Only for the individual layer, which is the default; a
-    plain wire that would need the cable layer stays in "noPoint".
+    A connection WITHOUT a definition point gets its properties derived by
+    EPLAN on every connection update. A stub that used to belong to a cable
+    connection inherited the cable conductor's function definition
+    ("Conductor/cable") and is recomputed to the cable layer each time -
+    writing the layer does not stick (P26009 FIJ/10, measured 2026-11-09).
+    With reset_without_point (default) such an individual connection gets a
+    direct-connection definition, copied from a plain individual connection
+    of the same page; the point that creates is switched to SPECIAL/CDPNG
+    (no graphic, like the cable line's crossing points), so nothing new is
+    drawn ("definition": "direct connection" in "changed"). Anything else
+    without a point stays in "noPoint".
 
     Args:
         page: Page name.
@@ -1896,7 +1939,7 @@ def live_set_connection_layers(page: str, cable_layer: int = 311, individual_lay
     body = (_guard_prelude(allow_real_project)
             + _LAYERS_BODY.replace("PAGENAME", cs_escape(page))
             .replace("CABLELAYER", str(cable_layer)).replace("INDLAYER", str(individual_layer))
-            .replace("RESET", "true" if reset_without_point else "false"))
+            .replace("FIXDEF", "true" if reset_without_point else "false"))
     r = _execute_script(
         live._script("LiveConnLayers_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),

@@ -61,3 +61,12 @@ def _isolate_action_log(tmp_path, monkeypatch):
     to be thinking about logging at all.
     """
     monkeypatch.setenv("EPLAN_MCP_LOG_DIR", str(tmp_path / "logs"))
+
+
+@pytest.fixture(autouse=True)
+def _private_eplan_lock(tmp_path_factory, monkeypatch):
+    """Keep the suite off the REAL cross-process EPLAN lock: a test calling
+    execute_action with a fake client took the machine's lock and queued
+    behind the sessions driving EPLAN (a 339 s run, 2026-11-09)."""
+    import eplan_lock
+    monkeypatch.setattr(eplan_lock, "LOCK_DIR", str(tmp_path_factory.mktemp("eplan_locks")))
