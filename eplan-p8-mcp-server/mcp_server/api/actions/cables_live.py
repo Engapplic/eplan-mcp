@@ -537,6 +537,66 @@ _REASSIGN_INNER = '''
                 results["lockedConductors"] = lockedConductors;
                 try { m.Invoke(csvc, new object[] { cable, true, excl }); results["reassignedFromPart"] = true; }
                 catch (Exception e) { results["reassignedFromPart"] = false; errors.Add("DoReassignWires: " + Flatten(e)); results["success"] = false; }
+                // A project part copy without master data (an Article created
+                // empty, or copied into the project before the parts database
+                // had its conductor templates: P26009 FES.8003618, 2026-11-09)
+                // hands out nothing: every conductor stays colourless. Reload
+                // the copy from the parts database and reassign once more.
+                if (results.ContainsKey("reassignedFromPart") && (bool)results["reassignedFromPart"])
+                {
+                    bool anyColour = false;
+                    object ccs2 = TryRead(cable, "CableConnections", null);
+                    if (ccs2 != null) foreach (object cc in (IEnumerable)ccs2)
+                    {
+                        object p2 = cc == null ? null : TryRead(cc, "Properties", null);
+                        if (p2 != null && !string.IsNullOrEmpty(PropText(p2, "CONNECTION_WIRENUMBER"))) { anyColour = true; break; }
+                    }
+                    object ars2 = TryRead(cable, "ArticleReferences", null);
+                    if (!anyColour && ars2 != null)
+                    {
+                        int reloaded = 0;
+                        foreach (object ar in (IEnumerable)ars2)
+                        {
+                            object art = ar == null ? null : TryRead(ar, "Article", null);
+                            if (art == null) continue;
+                            try { LockHard(art); object ok = art.GetType().GetMethod("LoadFromMasterdata", Type.EmptyTypes).Invoke(art, null); if (ok is bool && (bool)ok) reloaded++; }
+                            catch (Exception re) { errors.Add("LoadFromMasterdata: " + Flatten(re)); }
+                        }
+                        results["partReloaded"] = reloaded;
+                        if (reloaded > 0)
+                        {
+                            try { m.Invoke(csvc, new object[] { cable, true, excl }); }
+                            catch (Exception e2) { errors.Add("DoReassignWires after reload: " + Flatten(e2)); }
+                        }
+                    }
+                }
+                // The cable's own conductor count / cross-section / unit
+                // (20052 / 20053 / unit) come from the part when still empty:
+                // what the GUI fills in on part assignment.
+                try
+                {
+                    object cprops = TryRead(cable, "Properties", null);
+                    object ars3 = TryRead(cable, "ArticleReferences", null);
+                    object art3 = null;
+                    if (ars3 != null) foreach (object ar in (IEnumerable)ars3) if (ar != null && art3 == null) art3 = TryRead(ar, "Article", null);
+                    object aprops = art3 == null ? null : TryRead(art3, "Properties", null);
+                    if (cprops != null && aprops != null)
+                    {
+                        List<string> filled = new List<string>();
+                        string[][] pairs = new string[][] {
+                            new string[] { "FUNC_CABLEWIRECOUNT", "ARTICLE_CABLEWIRECOUNT" },
+                            new string[] { "FUNC_CABLEWIRECROSSSECTION", "ARTICLE_CABLEWIRECROSSSECTION" },
+                            new string[] { "FUNC_CABLE_CROSSSECTION_UNIT", "ARTICLE_WIRECROSSSECTION_UNIT" } };
+                        foreach (string[] pr in pairs)
+                        {
+                            string have = PropText(cprops, pr[0]) ?? "", v = PropText(aprops, pr[1]) ?? "";
+                            if (have != "" || v == "") continue;
+                            try { SetProp(cprops, pr[0], v); filled.Add(pr[0]); } catch (Exception fe) { results[pr[0] + "_error"] = Flatten(fe); }
+                        }
+                        if (filled.Count > 0) results["cableFieldsFromPart"] = filled;
+                    }
+                }
+                catch (Exception cfe) { results["cableFieldsError"] = Flatten(cfe); }
 '''
 
 
@@ -619,7 +679,19 @@ _DECORATE_BODY = """
                 object sp = TryRead(cc, "StartSymbolConnPoint", null);
                 object pl1 = sp == null ? null : TryRead(sp, "Location", null);
                 if (pl1 != null) { x1 += Convert.ToDouble(pl1.GetType().GetProperty("X").GetValue(pl1, null)); y1 += Convert.ToDouble(pl1.GetType().GetProperty("Y").GetValue(pl1, null)); }
-                cond.Add(new object[] { horizontal ? x1 : y1, cc });
+                // the other end too: the wire's extent along its axis
+                object sr2e = TryRead(cc, "EndSymbolReference", null);
+                object l2e = sr2e == null ? null : TryRead(sr2e, "Location", null);
+                double x2e = x1, y2e = y1;
+                if (l2e != null)
+                {
+                    x2e = Convert.ToDouble(l2e.GetType().GetProperty("X").GetValue(l2e, null)); y2e = Convert.ToDouble(l2e.GetType().GetProperty("Y").GetValue(l2e, null));
+                    object ep2 = TryRead(cc, "EndSymbolConnPoint", null);
+                    object pl2e = ep2 == null ? null : TryRead(ep2, "Location", null);
+                    if (pl2e != null) { x2e += Convert.ToDouble(pl2e.GetType().GetProperty("X").GetValue(pl2e, null)); y2e += Convert.ToDouble(pl2e.GetType().GetProperty("Y").GetValue(pl2e, null)); }
+                }
+                double a1 = horizontal ? y1 : x1, a2 = horizontal ? y2e : x2e;
+                cond.Add(new object[] { horizontal ? x1 : y1, cc, Math.Min(a1, a2), Math.Max(a1, a2) });
             }
             List<Dictionary<string, object>> points = new List<Dictionary<string, object>>();
             List<string> errors = new List<string>();
@@ -706,9 +778,13 @@ _DECORATE_BODY = """
                     if (loc == null) continue;
                     double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
                     double off = horizontal ? Math.Abs(ly - cmid) : Math.Abs(lx - cmid);
-                    if (off < 0.05 || off > 6.0) continue;                    // on the line itself, or far away
+                    if (off < 0.05) continue;                                  // on the line itself
+                    // anywhere along a crossed wire: EPLAN parked the second
+                    // point 3 mm under the sensor pins, 60 mm off the line
+                    // (P26009 =MOV+CAMPO/13, 2026-11-09)
+                    double along = horizontal ? ly : lx;
                     bool onWire = false;
-                    foreach (object[] c in cond) if (Math.Abs((double)c[0] - (horizontal ? lx : ly)) < 0.05) { onWire = true; break; }
+                    foreach (object[] c in cond) if (Math.Abs((double)c[0] - (horizontal ? lx : ly)) < 0.05 && along >= (double)c[2] - 0.05 && along <= (double)c[3] + 0.05) { onWire = true; break; }
                     if (!onWire) continue;
                     string nm = PropText(pl, "Name") ?? "";
                     if (nm != "" && nm != "=+" && nm != cableName) continue;
@@ -774,6 +850,11 @@ MAPROWS
             object ccs = TryRead(cable, "CableConnections", null);
             List<object> conds = new List<object>();
             if (ccs != null) foreach (object cc in (IEnumerable)ccs) if (cc != null) conds.Add(cc);
+            // NEVER `return` from the body: the result file is written after
+            // it, and a return left the caller waiting for the full timeout
+            // (P26009 =MOV+CAMPO/13 "no result file appeared within 60s",
+            // 2026-11-09).
+            bool skip = false;
             if (auto)
             {
                 // only when every conductor already carries a sensor-lead
@@ -783,10 +864,13 @@ MAPROWS
                 {
                     object cp0 = TryRead(cc, "Properties", null);
                     string col = cp0 == null ? "" : (PropText(cp0, "CONNECTION_WIRENUMBER") ?? "");
-                    if (col == "" || !allowed.Contains(col)) { results["skipped"] = "conductor colour '" + col + "' is not a sensor-lead colour; pass pin_colours explicitly"; results["success"] = true; results["conductors"] = rows; return; }
+                    if (col == "" || !allowed.Contains(col)) { results["skipped"] = "conductor colour '" + col + "' is not a sensor-lead colour; pass pin_colours explicitly"; skip = true; break; }
                 }
             }
-            foreach (object cc in conds)
+            // the page's connection definition points, read once
+            List<object> pageCdps = new List<object>();
+            foreach (object q in (IEnumerable)PagePlacements(page)) if (q != null && q.GetType().Name == "ConnectionDefinitionPoint") pageCdps.Add(q);
+            if (!skip) foreach (object cc in conds)
             {
                 Dictionary<string, object> d = new Dictionary<string, object>();
                 try
@@ -812,6 +896,11 @@ MAPROWS
                     d["pin"] = pin; d["colour"] = want; d["pinSide"] = pin == pin1 ? "start" : "end";
                     if ((string)d["before"] == want) { d["result"] = "already"; rows.Add(d); continue; }
                     LockHard(cc); LockHard(sr1); LockHard(sr2);
+                    // the colour write goes through to the connection's own
+                    // definition points: lock them first (pin 1 of P26009
+                    // /13 threw LockingException on its crossing point)
+                    object dps0 = TryRead(cc, "ConnectionDefPoints", null);
+                    if (dps0 != null) foreach (object q in (IEnumerable)dps0) if (q != null) LockHard(q);
                     int written = 0;
                     try { SetProp(cp, "CONNECTION_WIRENUMBER", want); written++; } catch (Exception e1) { d["connectionError"] = Flatten(e1); }
                     // the connection definition points on this wire (the
@@ -825,9 +914,8 @@ MAPROWS
                         if (pl1 != null) { x1 += Convert.ToDouble(pl1.GetType().GetProperty("X").GetValue(pl1, null)); y1 += Convert.ToDouble(pl1.GetType().GetProperty("Y").GetValue(pl1, null)); }
                         if (pl2 != null) { x2 += Convert.ToDouble(pl2.GetType().GetProperty("X").GetValue(pl2, null)); y2 += Convert.ToDouble(pl2.GetType().GetProperty("Y").GetValue(pl2, null)); }
                         int cdps = 0;
-                        foreach (object pl in PagePlacements(page))
+                        foreach (object pl in pageCdps)
                         {
-                            if (pl == null || pl.GetType().Name != "ConnectionDefinitionPoint") continue;
                             object loc = TryRead(pl, "Location", null);
                             if (loc == null) continue;
                             double lx = Convert.ToDouble(loc.GetType().GetProperty("X").GetValue(loc, null)), ly = Convert.ToDouble(loc.GetType().GetProperty("Y").GetValue(loc, null));
@@ -1103,6 +1191,12 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             conductors = _read()
             if len(conductors) >= wanted:
                 break
+        if wanted and len(conductors) < wanted and not replaced_line and inline:
+            # The in-script read right after the connection update can lag
+            # behind: one fresh read before treating the line as stale.
+            conductors = _read()
+            res["conductors"] = conductors
+            res["freshRead"] = True
         if wanted and len(conductors) < wanted and not replaced_line:
             # Some wires still linked to nothing (a moved line leaves its old
             # points on the wires it no longer crosses, and those wires keep
@@ -1149,7 +1243,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
             res2 = r2.get("results") if isinstance(r2.get("results"), dict) else r2
             res["reassignedFromPart"] = bool(isinstance(res2, dict) and res2.get("reassignedFromPart"))
             if isinstance(res2, dict):
-                for k in ("lockedPoints", "lockedConductors"):
+                for k in ("lockedPoints", "lockedConductors", "partReloaded", "cableFieldsFromPart"):
                     if k in res2:
                         res[k] = res2[k]
             if isinstance(res2, dict) and not res2.get("success"):
@@ -1296,7 +1390,24 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             GetWritable(fn.GetType(), "Name").SetValue(fn, cableName, null);
             // The tag shows only once VisibleName is set (like any
             // function); what the caller typed ("-W1") is what is shown.
-            try { GetWritable(fn.GetType(), "VisibleName").SetValue(fn, "''' + cs_escape(name) + '''", null); results["visibleName"] = "''' + cs_escape(name) + '''"; }
+            string shown = "''' + cs_escape(name) + '''";
+            if (shown.Contains("=") || shown.Contains("+"))
+            {
+                // like the GUI: the page's own = and + are not repeated on
+                // the tag ("=ST2+CAMPO-W17" on page =MOV+CAMPO shows "=ST2-W17")
+                object pprops2 = TryRead(page, "Properties", null);
+                string plant2 = PropText(pprops2, "DESIGNATION_PLANT") ?? "", loc2 = PropText(pprops2, "DESIGNATION_LOCATION") ?? "";
+                int ip = shown.IndexOf('+'), im = shown.IndexOf('-');
+                int plantEnd = ip >= 0 ? ip : (im >= 0 ? im : shown.Length);
+                string sPlant = shown.StartsWith("=") && plantEnd >= 1 ? shown.Substring(1, plantEnd - 1) : null;
+                string sLoc = ip >= 0 ? shown.Substring(ip + 1, (im > ip ? im : shown.Length) - ip - 1) : null;
+                string rest = im >= 0 ? shown.Substring(im) : "";
+                string v = "";
+                if (sPlant != null && sPlant != plant2) v += "=" + sPlant;
+                if (sLoc != null && sLoc != loc2) v += "+" + sLoc;
+                shown = v + rest;
+            }
+            try { GetWritable(fn.GetType(), "VisibleName").SetValue(fn, shown, null); results["visibleName"] = shown; }
             catch (Exception ve) { results["visibleNameError"] = Flatten(ve); }
             object props = TryRead(fn, "Properties", null);
             string text = "''' + text_cs + '''";
@@ -1337,7 +1448,8 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
             res["conductors"] = a_res.get("conductors") or []
             res["connectionsGenerated"] = a_res.get("connectionsGenerated")
             for k in ("reassignedFromPart", "lockedPoints", "lockedConductors", "replacedLine", "previousHandle",
-                      "inlineGenerate", "inlineGenerateError", "generatedFirst"):
+                      "inlineGenerate", "inlineGenerateError", "generatedFirst", "partReloaded", "cableFieldsFromPart",
+                      "freshRead"):
                 if k in a_res:
                     res[k] = a_res.get(k)
             if a_res.get("orphanPoints"):
