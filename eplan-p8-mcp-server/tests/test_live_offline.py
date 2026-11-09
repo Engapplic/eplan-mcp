@@ -1555,6 +1555,9 @@ def test_set_connection_layers_script(monkeypatch):
     assert 'string cableLayer = "311", indLayer = "510";' in cs
     assert 'string want = kind == "Cable" ? cableLayer : indLayer;' in cs
     assert 'SetProp(TryRead(dp, "Properties", null), "CONNECTION_ACL_LAYER", want);' in cs
-    assert "if (pts.Count == 0) { noPoint.Add(d); continue; }" in cs
+    assert "if (RESET && want == indLayer)".replace("RESET", "true") in cs
+    assert 'd["reset"] = true; d["pointsRemoved"] = gone;' in cs
+    cables_live.live_set_connection_layers("+CE/2", reset_without_point=False)
+    assert "if (false && want == indLayer)" in scripts[-1]
     assert r["results"]["connectionsGenerated"] is True and gens[0]["page_name"] == "+CE/2"
     assert cables_live.live_set_connection_layers("+CE/2", cable_layer="x")["success"] is False
