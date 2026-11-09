@@ -769,13 +769,17 @@ public class PartsCount_{uuid.uuid4().hex[:6]}
     return _execute_script(script)
 
 
-def parts_db_get_part(part_number: str) -> dict:
+def parts_db_get_part(part_number: str, brief: bool = True) -> dict:
     """
     Get detailed information about a specific part.
 
     Args:
         part_number: The part number to look up. Matched EXACTLY against
             MDPart.PartNr; use parts_db_query for substring search.
+        brief: Default True: multilingual texts keep only es_ES / en_US,
+            and the external document links, EDP and change-log fields are
+            dropped (a Festo cable answered 19 KB, mostly its description
+            in 25 languages). False returns every filled property.
 
     Returns:
         dict with "found" and, when found, "part" carrying PartNr, the three
@@ -990,7 +994,8 @@ public class PartsGet_{uuid.uuid4().hex[:6]}
     }}
 }}
 '''
-    return _execute_script(script)
+    r = _execute_script(script)
+    return _brief_part(r) if brief else r
 
 
 def parts_db_create(part_number: str, properties: dict = None) -> dict:
@@ -1946,3 +1951,35 @@ def execute_custom_script(script_code: str, timeout_seconds: float = 30.0) -> di
     if isinstance(result, dict) and audit_name:
         result["audit_script"] = audit_name
     return result
+
+
+
+_LANG_KEEP = ("es_ES", "en_US", "en_EN", "??_??")
+_PART_DROP = ("ARTICLE_EXTERNAL_DOCUMENT", "ARTICLE_EDP_", "PART_", "ARTICLE_UNIQUEID", "ARTICLE_QUANTITYUNIT",
+              "ARTICLE_PICTUREFILE")
+
+
+def _langs(v):
+    # "de_DE@x;en_US@y;es_ES@z;" -> "en_US@y;es_ES@z;" (one language left is kept whatever it is)
+    if not isinstance(v, str) or "@" not in v or ";" not in v:
+        return v
+    parts = [p for p in v.split(";") if p]
+    if not all(len(p) > 6 and p[2] == "_" and p[5] == "@" for p in parts):
+        return v
+    keep = [p for p in parts if p[:5] in _LANG_KEEP]
+    keep = keep or parts[:1]
+    return ";".join(keep) + ";"
+
+
+def _brief_part(r):
+    res = r.get("results") if isinstance(r.get("results"), dict) else None
+    part = res.get("part") if isinstance(res, dict) else None
+    if not isinstance(part, dict):
+        return r
+    for k in list(part):
+        if isinstance(part[k], str):
+            part[k] = _langs(part[k])
+    props = part.get("Properties")
+    if isinstance(props, dict):
+        part["Properties"] = {k: _langs(v) for k, v in props.items() if not k.startswith(_PART_DROP)}
+    return r

@@ -483,6 +483,8 @@ answer briefly by default and take their input from files:
 | `eplan_live_read_page` | as before, plus filters `types=[...]`, `region=[x1,y1,x2,y2]` (location inside, page mm), `name_regex`, `fields=[...]` (handle always kept) | - |
 | `eplan_live_read_connections` | as before, plus `device` (tag substring, either end), `region`, `kind`, `summary=True` (only `byKind` counts) | - |
 | `eplan_live_assign_cable_connections` | `cable="all"`: every cable of the page, `{count, failed, cables[{name, conductors, colours, error?}]}` | per cable call |
+| `eplan_live_assign_cable_connections`, `eplan_live_place_cable_definition` | `{handle, conductors (n), colours, crossSections, pinColours {set, already}, crossings {points}, repairs, errors}` | `brief=False` |
+| `eplan_parts_db_get_part` | es_ES / en_US texts only, no document links or EDP fields | `brief=False` |
 | `eplan_live_render_page` | `region=[x1,y1,x2,y2]` cut on the server (`crop` path), `scale` or `width` | whole page in `files` |
 
 ### Connector recipe (`eplan_live_apply_connector_recipe`)

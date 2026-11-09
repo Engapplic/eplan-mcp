@@ -373,6 +373,56 @@ def _recreate_line(page: str, handle: str, allow_real_project: bool, timeout_sec
     return res if isinstance(res, dict) else {"success": False, "error": str(res)}
 
 
+_BRIEF_KEEP = ("success", "project", "page", "handle", "name", "cable", "visibleName", "parts",
+               "connectionsGenerated", "replacedLine", "previousHandle", "generatedFirst",
+               "reassignedFromPart", "partReloaded", "cableFieldsFromPart", "rebuiltFor",
+               "droppedConductors", "freshRead", "error", "errorType")
+
+
+def brief_cable_result(r):
+    """A cable tool's answer reduced to what the caller acts on: the
+    conductors as counts and colours, what was repaired, what failed (one
+    assignment answered ~2 KB of crossings and pin rows; 41 of them on
+    P26009's pages, 2026-11-09). brief=False keeps everything."""
+    if not isinstance(r, dict):
+        return r
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    if not isinstance(res, dict):
+        return r
+    out = {k: res[k] for k in _BRIEF_KEEP if k in res}
+    cond = res.get("conductors")
+    if isinstance(cond, list):
+        out["conductors"] = len(cond)
+        out["colours"] = "/".join((c.get("colour") or "?") for c in cond if isinstance(c, dict))
+        secs = sorted({c.get("crossSection") for c in cond if isinstance(c, dict) and c.get("crossSection")})
+        if secs:
+            out["crossSections"] = secs
+    crossed = res.get("crossed")
+    if isinstance(crossed, list):
+        out["crossed"] = len(crossed)
+    pc = res.get("pinColours")
+    if isinstance(pc, dict):
+        rows = pc.get("conductors") or []
+        out["pinColours"] = {"set": sum(1 for x in rows if isinstance(x, dict) and x.get("result") in ("set", "points")),
+                             "already": sum(1 for x in rows if isinstance(x, dict) and x.get("result") == "already")}
+        if pc.get("skipped"):
+            out["pinColours"]["skipped"] = pc["skipped"]
+    cr = res.get("crossings")
+    if isinstance(cr, dict):
+        out["crossings"] = {"points": len(cr.get("crossingPoints") or []), "extraPoints": len(cr.get("extraPoints") or [])}
+    for k in ("unplacedConductors", "orphanPoints"):
+        if res.get(k):
+            out[k] = len(res[k])
+    errs = {k: v for k, v in res.items() if (k.endswith("Error") or k == "errors") and v}
+    if errs:
+        out["errors"] = errs
+    if r is res:
+        return out
+    env = {k: v for k, v in r.items() if k != "results"}
+    env["results"] = out
+    return env
+
+
 def _assign_all(page, **kw):
     """Every cable definition line of a page, one after the other; a brief
     answer per cable (name, conductors, colours, what went wrong)."""
@@ -383,7 +433,7 @@ def _assign_all(page, **kw):
         return {"success": False, "error": res.get("error") or "page read failed"}
     rows, failed = [], 0
     for c in res.get("placements") or []:
-        a = live_assign_cable_connections(page, c.get("handle"), **kw)
+        a = live_assign_cable_connections(page, c.get("handle"), brief=False, **kw)
         ar = a.get("results") if isinstance(a.get("results"), dict) else a
         cond = ar.get("conductors") or []
         row = {"name": c.get("name"), "handle": ar.get("handle") or c.get("handle"),
@@ -1180,7 +1230,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                                   extra_points: str = "hide",
                                   allow_real_project: bool = False,
                                   timeout_seconds: float = 180.0, replaced_line: bool = False,
-                                  drop_unplaced: bool = False) -> dict:
+                                  drop_unplaced: bool = False, brief: bool = True) -> dict:
     """
     Make the connections a cable definition line crosses its conductors.
     WRITES - scratch-only by default.
@@ -1245,6 +1295,13 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
         cable = cs_text(cable, "cable")
     except SchematicValueError as exc:
         return _err(exc)
+    if brief and cable.strip().lower() not in ("all", "*"):
+        return brief_cable_result(live_assign_cable_connections(
+            page, cable, generate=generate, reassign_from_part=reassign_from_part,
+            crossing_texts=crossing_texts, crossing_style=crossing_style, pin_colours=pin_colours,
+            extra_points=extra_points, allow_real_project=allow_real_project,
+            timeout_seconds=timeout_seconds, replaced_line=replaced_line,
+            drop_unplaced=drop_unplaced, brief=False))
     if cable.strip().lower() in ("all", "*"):
         return _assign_all(page, generate=generate, reassign_from_part=reassign_from_part,
                            crossing_texts=crossing_texts, crossing_style=crossing_style,
@@ -1341,7 +1398,7 @@ def live_assign_cable_connections(page: str, cable: str, generate: bool = True,
                             crossing_texts=crossing_texts, crossing_style=crossing_style,
                             pin_colours=pin_colours, extra_points=extra_points,
                             allow_real_project=allow_real_project, timeout_seconds=timeout_seconds,
-                            replaced_line=True)
+                            replaced_line=True, brief=False)
                         again_res = again.get("results") if isinstance(again.get("results"), dict) else again
                         if isinstance(again_res, dict):
                             again_res["replacedLine"] = True
@@ -1443,7 +1500,8 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
                                 extra_points: str = "hide",
                                 allow_real_project: bool = False,
                                 timeout_seconds: float = 180.0,
-                                reassign_from_part: bool = None, replaced_line: bool = False) -> dict:
+                                reassign_from_part: bool = None, replaced_line: bool = False,
+                                brief: bool = True) -> dict:
     """
     Place a cable definition line across connections and name it. WRITES -
     scratch-only by default.
@@ -1496,6 +1554,13 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
         DELETED line that were removed from these wires first (they would
         have kept the new line from linking).
     """
+    if brief:
+        return brief_cable_result(live_place_cable_definition(
+            page, name, x1, y1, x2, y2, part=part, text=text, properties=properties, symbol=symbol,
+            variant=variant, generate=generate, scheme=scheme, show=show, crossing_texts=crossing_texts,
+            crossing_style=crossing_style, pin_colours=pin_colours, extra_points=extra_points,
+            allow_real_project=allow_real_project, timeout_seconds=timeout_seconds,
+            reassign_from_part=reassign_from_part, replaced_line=replaced_line, brief=False))
     try:
         page = cs_text(page, "page")
         name = cs_text(name, "name")
@@ -1592,7 +1657,7 @@ def live_place_cable_definition(page: str, name: str, x1: float, y1: float,
     if generate and isinstance(res, dict) and res.get("success"):
         a = live_assign_cable_connections(page, res.get("handle"), generate=True,
                                           reassign_from_part=bool(part) if reassign_from_part is None else reassign_from_part,
-                                          replaced_line=replaced_line,
+                                          replaced_line=replaced_line, brief=False,
                                           crossing_texts=crossing_texts,
                                           crossing_style=crossing_style, pin_colours=pin_colours,
                                           extra_points=extra_points,

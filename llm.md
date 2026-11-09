@@ -361,7 +361,7 @@ All of these exist as `eplan_*` tools:
   updates link nothing the line is stale: its orphan points are removed
   and the line is cloned through a one-object window macro on the same
   wires, full name / part / text arrangement kept - `replacedLine`, the
-  old handle is gone), `eplan_live_apply_connector_recipe` (a sensor page reworked to plugged
+  old handle is gone), `eplan_live_assign_cable_connections` / `eplan_live_place_cable_definition` answer briefly by default (conductors as count + colours, what was repaired, errors; `brief=False` for the detail) and `eplan_parts_db_get_part` keeps only es_ES/en_US texts and drops document links unless `brief=False`, `eplan_live_apply_connector_recipe` (a sensor page reworked to plugged
   hoses in ONE call - retag of the boxes, symbols in place, XBD2/XSD2
   connectors tagged with the cable, rebuild, every cable reassigned,
   the Y's designation texts, connection layers - answering with a
