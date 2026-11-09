@@ -888,7 +888,7 @@ def test_decorate_extra_points_and_hard_locks(monkeypatch):
     assert 'pl.GetType().Name == "ConnectionDefinitionPoint") { LockHard(pl); lockedPoints++; }' in scripts[-1]
     # the placed line gets a visible tag
     cables_live.live_place_cable_definition("+CE/2", "-W1", 70, 112, 220, 112, generate=False)
-    assert 'GetWritable(fn.GetType(), "VisibleName").SetValue(fn, "-W1", null);' in scripts[-1]
+    assert 'string shown = "-W1";' in scripts[-1] and '"VisibleName").SetValue(fn, shown, null);' in scripts[-1]
 
 
 def test_copy_pages_keeps_subcounter(monkeypatch):
@@ -1279,3 +1279,81 @@ def test_clean_cable_points_script(monkeypatch):
     assert "double rx1 = 20.0, ry1 = 80.0, rx2 = 60.0, ry2 = 200.0; string cableName = \"=ST1+CAMPO-W90.1\";" in cs
     assert 'if (des != "") continue;' in cs and '(cableName != "" && name == cableName)' in cs
     assert gens == [{"project_name": None, "page_name": "+CAMPO/1"}] and r["results"]["connectionsGenerated"] is True
+
+
+def test_pin_colours_script_never_returns_early(monkeypatch):
+    # an early `return;` in the body skipped the result file: the caller
+    # waited the whole timeout (P26009 =MOV+CAMPO/13, 2026-11-09)
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_set_conductor_colours("+CE/2", "-W1", pin_colours="auto")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    body = cs[cs.index("bool auto = true;"):cs.index("string json = Newtonsoft")]
+    assert "return;" not in body
+    assert "skip = true; break;" in body and "if (!skip) foreach (object cc in conds)" in body
+    # the connection's own definition points are locked before the colour write
+    assert 'object dps0 = TryRead(cc, "ConnectionDefPoints", null);' in body
+    assert "foreach (object pl in pageCdps)" in body
+
+
+def test_reassign_reloads_empty_part_copy_and_fills_cable_fields(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=True)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'GetMethod("LoadFromMasterdata", Type.EmptyTypes)' in cs and 'results["partReloaded"] = reloaded;' in cs
+    assert '"DoReassignWires after reload: "' in cs
+    assert 'new string[] { "FUNC_CABLE_CROSSSECTION_UNIT", "ARTICLE_WIRECROSSSECTION_UNIT" }' in cs
+    assert 'results["cableFieldsFromPart"] = filled;' in cs
+
+
+def test_place_cable_visible_name_relative_to_page(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_place_cable_definition("=MOV+CAMPO/13", "=ST2+CAMPO-W17", 71, 84, 97, 84, generate=False)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'string shown = "=ST2+CAMPO-W17";' in cs
+    assert 'if (sPlant != null && sPlant != plant2) v += "=" + sPlant;' in cs
+    assert '"VisibleName").SetValue(fn, shown, null); results["visibleName"] = shown;' in cs
+
+
+def test_decorate_extra_points_anywhere_along_the_wire(monkeypatch):
+    from api.actions import cables_live
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True}})
+    cables_live.live_decorate_cable_crossings("+CE/2", "-W1", extra_points="remove")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "off > 6.0" not in cs
+    assert "cond.Add(new object[] { horizontal ? x1 : y1, cc, Math.Min(a1, a2), Math.Max(a1, a2) });" in cs
+    assert "along >= (double)c[2] - 0.05 && along <= (double)c[3] + 0.05" in cs
+
+
+def test_assign_reads_again_before_replacing_the_line(monkeypatch):
+    # the in-script conductor read right after the update can lag: a fresh
+    # read that shows every wire linked means no clone
+    from api.actions import cables_live, generate
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: {"success": True, "results": {
+                            "success": True, "handle": "h", "cable": "=+CE-W1", "inlineGenerate": True, "connectionsGenerated": 3,
+                            "conductors": [], "cableStart": [70, 110], "cableEnd": [220, 110],
+                            "crossed": [{"assigned": "now"}, {"assigned": "now"}]}})
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: {"success": True})
+    monkeypatch.setattr(cables_live, "live_cables",
+                        lambda **kw: {"results": {"cables": [{"handle": "h", "conductors": [{"designation": "1"}, {"designation": "2"}]}]}})
+    called = []
+    monkeypatch.setattr(cables_live, "_orphan_points", lambda *a, **k: called.append("orphans") or {"success": True, "orphanPoints": []})
+    monkeypatch.setattr(cables_live, "_recreate_line", lambda *a, **k: called.append("recreate") or {"success": False})
+    r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
+    res = r["results"]
+    assert called == [] and res.get("freshRead") is True and len(res["conductors"]) == 2 and "replacedLine" not in res

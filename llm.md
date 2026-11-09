@@ -321,20 +321,27 @@ All of these exist as `eplan_*` tools:
   of ~20; wires
   drawn in this session get one connection update first; the crossing
   points a DELETED line left on the wires are removed first, since a wire
-  that still carries one never links to a new line - `orphanPoints`),
+  that still carries one never links to a new line - `orphanPoints`; a
+  project part copy without master data hands out no colours, so it is
+  reloaded from the parts database and reassigned - `partReloaded`; the
+  cable's own conductor count / cross-section come from the part when
+  empty - `cableFieldsFromPart`; the shown tag omits the page's own =/+
+  like the GUI: "=ST2+CAMPO-W17" on =MOV+CAMPO shows "=ST2-W17"),
   `eplan_live_decorate_cable_crossings` (the zero-size "=+" connection
   definition points EPLAN leaves on the line at each crossed wire are
   named after the cable, given the conductor's colour / cross-section and
   show them rotated 90 deg at the crossing like a manufacturer macro - or
   horizontal, docked, colour only, with `style` / `crossing_style`; the
-  second point "Asignar conexiones" leaves off the line is hidden,
-  removed or kept with `extra_points`; run by default from the two tools
+  second point "Asignar conexiones" leaves anywhere along a crossed wire
+  (even 60 mm off the line, under the device pins) is hidden, removed or
+  kept with `extra_points`; run by default from the two tools
   above, `crossing_texts=False` skips it),
   `eplan_live_set_conductor_colours` (colour per PIN, not per template
   order: "Asignar conexiones" hands a sensor lead's BN/BK/BU out in
   template order, so pin 3 got BK; the M8/M12 sensor map 1 BN, 2 WH, 3 BU,
   4 BK, 5 GY or an explicit {pin: colour}; `pin_colours="auto"` on the two
-  tools above applies it when the part gave sensor-lead colours; a DCP
+  tools above applies it when the part gave sensor-lead colours and
+  returns at once with `skipped` otherwise; a DCP
   black-box pin is read from the DCP function's name, not the symbol pin) and
   `eplan_live_assign_cable_connections` (re-run the geometric assignment
   for a line placed by hand or moved: EPLAN does not assign conductors to
