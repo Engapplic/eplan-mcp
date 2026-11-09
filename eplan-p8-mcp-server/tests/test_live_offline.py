@@ -1518,3 +1518,14 @@ def test_update_parts_replace_remove_and_nested_follow(monkeypatch):
     cs = scripts[-1]
     assert _string_literals_balanced(cs)
     assert "ownCodeCleared" not in cs
+
+
+def test_pin_follow_keeps_full_designation_and_covers_terminals():
+    from api.actions import ops, cables_live
+    h = ops._OPS_HELPERS
+    assert "static bool IsBoxPinType(object o)" in h and 'return tn == "Function" || tn == "Terminal";' in h
+    body = h[h.index("static bool PinFollowBox(object o)"):h.index("static List<object> PinsOfBox")]
+    assert "int c = n.IndexOf(':');" in body and "LastIndexOf" not in body
+    assert "if (pl == null || Handle(pl) == me || !IsBoxPinType(pl)) continue;" in h
+    # house style is the default for the crossing texts
+    assert cables_live.CROSSING_STYLE == {"rotation": 0.0, "height": 1.8, "docked": True, "section": False, "section_height": 1.3}

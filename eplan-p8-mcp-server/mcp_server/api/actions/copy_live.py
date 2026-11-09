@@ -164,8 +164,8 @@ _COPY_BODY = '''
                 try { foreach (object p in (IEnumerable)bx.GetType().GetMethod("GetBoundingBox", Type.EmptyTypes).Invoke(bx, null)) { double px = Convert.ToDouble(p.GetType().GetProperty("X").GetValue(p, null)), py = Convert.ToDouble(p.GetType().GetProperty("Y").GetValue(p, null)); bxx0 = Math.Min(bxx0, px); bxx1 = Math.Max(bxx1, px); bxy0 = Math.Min(bxy0, py); bxy1 = Math.Max(bxy1, py); } } catch { continue; }
                 foreach (object o in all)
                 {
-                    if (o == null || o.GetType().Name != "Function") continue;
-                    string pn = PropText(o, "Name") ?? ""; int c = pn.LastIndexOf(':'); if (c < 0) continue;
+                    if (o == null || (o.GetType().Name != "Function" && o.GetType().Name != "Terminal")) continue;
+                    string pn = PropText(o, "Name") ?? ""; int c = pn.IndexOf(':'); if (c < 0) continue;   // first colon: "X1:1" keeps its X1
                     object lo = TryRead(o, "Location", null); if (lo == null) continue;
                     double ox = Convert.ToDouble(lo.GetType().GetProperty("X").GetValue(lo, null)), oy = Convert.ToDouble(lo.GetType().GetProperty("Y").GetValue(lo, null));
                     if (ox < bxx0 - 0.01 || ox > bxx1 + 0.01 || oy < bxy0 - 0.01 || oy > bxy1 + 0.01) continue;

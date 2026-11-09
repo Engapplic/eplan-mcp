@@ -405,11 +405,23 @@ _OPS_HELPERS = r'''
     // P26009 =MOV+CAMPO/13). Measured 2026-11-09: writing ":1" cures even a
     // pin that is already nested. Terminals are left alone (their strip is
     // their device).
+    static bool IsBoxPinType(object o)
+    {
+        if (o == null) return false;
+        string tn = o.GetType().Name;
+        // the terminals of a device macro (an SMC EX600's XI0:1..) sit in
+        // its box like DCP pins do and carry the same stale own code
+        // ("-A30.4-A30.3-A30.3:1" on P26009)
+        return tn == "Function" || tn == "Terminal";
+    }
+
     static bool PinFollowBox(object o)
     {
-        if (o == null || o.GetType().Name != "Function") return false;
+        if (!IsBoxPinType(o)) return false;
         string n = PropText(o, "Name") ?? "";
-        int c = n.LastIndexOf(':');
+        // the FIRST colon: a designation may itself carry one ("X1:1" on a
+        // Festo Y box - the last colon lost the "X1" and X1:1 / X2:1 merged)
+        int c = n.IndexOf(':');
         if (c < 0) return false;
         string want = n.Substring(c);
         object np = TryRead(o, "NameParts", null);
@@ -431,7 +443,7 @@ _OPS_HELPERS = r'''
         if (bb == null) return pins;
         foreach (object pl in PagePlacements(page))
         {
-            if (pl == null || Handle(pl) == me || pl.GetType().Name != "Function") continue;
+            if (pl == null || Handle(pl) == me || !IsBoxPinType(pl)) continue;
             if (limitTo != null && !limitTo.Contains(Handle(pl))) continue;
             if ((PropText(pl, "Name") ?? "").IndexOf(':') < 0) continue;
             object lo = TryRead(pl, "Location", null); if (lo == null) continue;
