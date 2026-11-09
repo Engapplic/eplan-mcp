@@ -1357,3 +1357,43 @@ def test_assign_reads_again_before_replacing_the_line(monkeypatch):
     r = cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=True, reassign_from_part=False, crossing_texts=False)
     res = r["results"]
     assert called == [] and res.get("freshRead") is True and len(res["conductors"]) == 2 and "replacedLine" not in res
+
+
+def test_window_macro_inserts_lock_the_whole_page_first(monkeypatch):
+    # Insert.WindowMacro writes into objects already on the page (P26009
+    # =MOV+CAMPO/13: LockingException on a pin of an earlier column)
+    from api.actions import ops, copy_live, cables_live
+    scripts = []
+    fake = lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}}
+    cs = ops._OPS_HELPERS
+    assert "static int LockPageAll(object page)" in cs and "LockPageAll(page);" in cs
+    assert cs.index("LockPageAll(page);") < cs.index("if (symbolMacro)")
+    monkeypatch.setattr(copy_live, "_execute_script", fake)
+    copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "foreach (object pl0 in PagePlacements(dst)) if (pl0 != null) { LockTree(pl0); lockedOnPage++; }" in cs
+    assert cs.index("LockTree(dst);") < cs.index("wmi.Invoke(ins")
+    monkeypatch.setattr(cables_live, "_execute_script", fake)
+    cables_live._recreate_line("+CE/2", "1/2/3/0", False, 60)
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert "foreach (object pl0 in PagePlacements(page)) if (pl0 != null) LockTree(pl0);" in cs
+    assert cs.index("LockTree(page);\n            foreach (object pl0") < cs.index("wm6.Invoke(ins")
+
+
+def test_nested_functions_follow_their_box(monkeypatch):
+    # a DCP pin inside a black box composes its name from the box: writing
+    # the full name into it doubles the code ("-B17-B17:1", P26009 /13), so
+    # copy_region and the structure box leave nested functions' names alone
+    from api.actions import ops, copy_live
+    h = ops._OPS_HELPERS
+    assert "static string NestedCodeOf(object o)" in h
+    assert 'if (NestedCodeOf(o) != "") continue;   // a pin inside a black box follows the box' in h
+    scripts = []
+    monkeypatch.setattr(copy_live, "_execute_script",
+                        lambda s, timeout=0, **k: scripts.append(s) or {"success": True, "results": {"success": True}})
+    copy_live.live_copy_region("+CE/2", 0, 0, 10, 10, x=50, y=0, rename={"=ST2": "=ST3"})
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'if (nn != n && nestedCode == "")' in cs and 'if (vn != "" && vnn != vn && nestedCode == "")' in cs

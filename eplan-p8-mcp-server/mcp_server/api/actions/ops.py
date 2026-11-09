@@ -260,6 +260,25 @@ _OPS_HELPERS = r'''
         foreach (object s in (IEnumerable)subs) if (s != null) LockDeep(s);
     }
 
+    // Write-lock the page and every object on it (LockObject + SmartLock,
+    // groups included). Insert.WindowMacro writes into EXISTING objects of
+    // the page - the connection update it triggers touched the pin of a
+    // device placed earlier and threw LockingException ("No se ha
+    // bloqueado el objeto...", P26009 =MOV+CAMPO/13, 2026-11-09).
+    static int LockPageAll(object page)
+    {
+        int n = 0;
+        try { Lock(page); } catch { }
+        foreach (object pl in PagePlacements(page))
+        {
+            if (pl == null) continue;
+            LockDeep(pl);
+            try { MethodInfo sm = pl.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(pl, null); } catch { }
+            n++;
+        }
+        return n;
+    }
+
     static double[] BBoxOf(object pl)
     {
         Dictionary<string, object> d = DumpPlacement(pl, false);
@@ -422,6 +441,20 @@ _OPS_HELPERS = r'''
         foreach (object s in (IEnumerable)subs) if (s != null) CollectDevices(s, into);
     }
 
+
+    // A function nested in a black box (the DCP pins of a sensor macro, the
+    // terminals drawn inside a device box) carries its box's code in
+    // FUNC_NESTEDCODE and composes its name from it. Writing the full name
+    // into such a pin stores the box code as the pin's OWN code too, and
+    // EPLAN then shows "-B17-B17:1" (one more "-B17" per write: P26009
+    // =MOV+CAMPO/13 had "-B17-B17-B17:1", 2026-11-09). Nested functions
+    // follow their box: their name is never written directly.
+    static string NestedCodeOf(object o)
+    {
+        try { object np = TryRead(o, "NameParts", null); return np == null ? "" : (PropText(np, "FUNC_NESTEDCODE") ?? ""); }
+        catch { return ""; }
+    }
+
     static bool IsMainFunction(object o)
     {
         try { object v = TryRead(o, "IsMainFunction", null); return v == null ? true : (bool)v; }
@@ -558,6 +591,8 @@ _OPS_HELPERS = r'''
         try { repVal = Enum.Parse(wp[1].ParameterType, rep); }
         catch (Exception) { throw new Exception("Unknown representation '" + rep + "'. Values: " + string.Join(", ", Enum.GetNames(wp[1].ParameterType))); }
         object move = Enum.Parse(wp[5].ParameterType, "Absolute");
+        // the insert writes into what is already on the page: lock it all first
+        LockPageAll(page);
         object[] objs;
         if (symbolMacro)
         {
@@ -703,6 +738,7 @@ _OPS_HELPERS = r'''
             foreach (object o in devs)
             {
                 if (o.GetType().Name == "LocationBox") continue;
+                if (NestedCodeOf(o) != "") continue;   // a pin inside a black box follows the box
                 object lo = TryRead(o, "Location", null);
                 if (lo == null) continue;
                 Dictionary<string, object> ld = PtDict(lo);

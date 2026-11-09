@@ -315,6 +315,9 @@ _RECREATE_BODY = '''
             }
             if (wm6 == null) throw new Exception("Insert.WindowMacro(string, RepresentationType, int, Page, PointD, MoveKind) not found.");
             ParameterInfo[] wp = wm6.GetParameters();
+            // the insert writes into what is already on the page: lock it all first
+            LockTree(page);
+            foreach (object pl0 in PagePlacements(page)) if (pl0 != null) LockTree(pl0);
             object[] objs;
             try { objs = (object[])wm6.Invoke(ins, new object[] { macroFile, rep, 0, page, MakePoint(wp[4].ParameterType, lx, ly), Enum.Parse(wp[5].ParameterType, "Absolute") }); }
             catch (TargetInvocationException tie) { throw new Exception("Insert.WindowMacro failed: " + Flatten(tie.InnerException ?? tie)); }
