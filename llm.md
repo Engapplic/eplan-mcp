@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **254 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **255 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -359,7 +359,11 @@ All of these exist as `eplan_*` tools:
   updates link nothing the line is stale: its orphan points are removed
   and the line is cloned through a one-object window macro on the same
   wires, full name / part / text arrangement kept - `replacedLine`, the
-  old handle is gone), `eplan_live_clean_cable_points` (remove the points
+  old handle is gone), `eplan_live_set_connection_layers` (uniform colours
+  of the autoconnect lines of a page: the colour is the layer's pen, cable
+  conductors on EPLAN311 - red -, plain wires on EPLAN510 - blue -, written
+  on the connection definition points; a wire without a point is only
+  listed, a connection update resets it), `eplan_live_clean_cable_points` (remove the points
   a deleted or moved cable line left on the wires inside a rectangle -
   they keep a wire in Cable kind so no new line links to it),
   `eplan_live_place_strand` (the conductor bundle of a sensor lead the way

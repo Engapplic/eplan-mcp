@@ -1643,3 +1643,110 @@ def live_clean_cable_points(page: str, x1: float, y1: float, x2: float, y2: floa
         g = generate_connections(project_name=_target.get() or None, page_name=page_cs)
         res["connectionsGenerated"] = bool(g.get("success"))
     return r
+
+
+_LAYERS_BODY = '''
+            object page = FindPage(project, "PAGENAME");
+            string cableLayer = "CABLELAYER", indLayer = "INDLAYER";
+            Type finderType = FindType("Eplan.EplApi.DataModel.DMObjectsFinder");
+            object finder = Activator.CreateInstance(finderType, new object[] { project });
+            Type cfT = FindType("Eplan.EplApi.DataModel.ConnectionsFilter");
+            object cf = Activator.CreateInstance(cfT);
+            MethodInfo gc = finderType.GetMethod("GetConnections", new Type[] { cfT });
+            List<Dictionary<string, object>> changed = new List<Dictionary<string, object>>(), noPoint = new List<Dictionary<string, object>>();
+            List<string> errors = new List<string>(); int seen = 0, ok = 0;
+            LockAny(page);
+            foreach (object cn in (IEnumerable)gc.Invoke(finder, new object[] { cf }))
+            {
+                if (cn == null) continue;
+                object pg = TryRead(cn, "Page", null);
+                if (pg == null || PropText(pg, "Name") != "PAGENAME") continue;
+                seen++;
+                string kind = Convert.ToString(TryRead(cn, "KindOfWire", null));
+                string want = kind == "Cable" ? cableLayer : indLayer;
+                object props = TryRead(cn, "Properties", null);
+                string have = props == null ? "" : (PropText(props, "CONNECTION_ACL_LAYER") ?? "");
+                if (have == want) { ok++; continue; }
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(cn); d["kind"] = kind; d["from"] = have; d["to"] = want;
+                object sr1 = TryRead(cn, "StartSymbolReference", null), sr2 = TryRead(cn, "EndSymbolReference", null);
+                d["source"] = sr1 == null ? "" : (PropText(sr1, "Name") ?? ""); d["target"] = sr2 == null ? "" : (PropText(sr2, "Name") ?? "");
+                // the layer lives on the connection definition point(s): a
+                // connection without one is drawn on the default layer, and
+                // writing into it would CREATE a visible point - so it is
+                // only reported (a connection update usually resets it)
+                object dps = TryRead(cn, "ConnectionDefPoints", null);
+                List<object> pts = new List<object>();
+                if (dps != null) foreach (object dp in (IEnumerable)dps) if (dp != null) pts.Add(dp);
+                if (pts.Count == 0) { noPoint.Add(d); continue; }
+                int written = 0;
+                foreach (object dp in pts)
+                {
+                    try { LockHard(dp); SetProp(TryRead(dp, "Properties", null), "CONNECTION_ACL_LAYER", want); written++; }
+                    catch (Exception e) { errors.Add(Handle(dp) + ": " + Flatten(e)); }
+                }
+                d["pointsWritten"] = written;
+                changed.Add(d);
+            }
+            results["connections"] = seen; results["alreadyRight"] = ok; results["changed"] = changed; results["noPoint"] = noPoint;
+            results["errors"] = errors; results["success"] = errors.Count == 0;
+'''
+
+
+def live_set_connection_layers(page: str, cable_layer: int = 311, individual_layer: int = 510,
+                               generate: bool = True, allow_real_project: bool = False,
+                               timeout_seconds: float = 120.0) -> dict:
+    """
+    Put every autoconnect line of a page on the layer its kind of
+    connection belongs to - cable conductors on one, plain wires on the
+    other - so the colours come out uniform. WRITES - scratch-only by default.
+
+    The colour of an autoconnect line is its layer's pen: EPLAN311 (cable
+    connections, red by default) for a connection that is a cable
+    conductor, EPLAN510 (connections, blue) for an individual one. The
+    layer is the connection's CONNECTION_ACL_LAYER and lives on its
+    connection definition point(s). After a column is rewired through
+    plug connectors (reed -> XD1 -> strand -> cable -> XD2 -> Y), old
+    connections keep the layer they had and the segments come out mixed
+    (P26009 =FIJ+CAMPO/10, 2026-11-09). This rewrites the layer on every
+    connection of the page that has a definition point and runs a
+    connection update so the lines redraw.
+
+    A connection WITHOUT a definition point cannot be given a layer
+    without creating a visible point, so it is only listed in "noPoint";
+    those are drawn on the default layer anyway, and a connection update
+    (eplan_generate_connections, rebuild_all=True for stubborn ones) resets
+    them.
+
+    Args:
+        page: Page name.
+        cable_layer: Layer id for cable conductors (default 311 = EPLAN311).
+        individual_layer: Layer id for plain wires (default 510 = EPLAN510).
+        generate: Run a connection update afterwards (default True).
+        allow_real_project: Must be True to write outside the scratch root.
+        timeout_seconds: Default 120.
+
+    Returns:
+        {"success", "connections", "alreadyRight", "changed": [{handle, kind,
+        from, to, source, target, pointsWritten}], "noPoint": [...], "errors"}
+    """
+    try:
+        page = cs_text(page, "page")
+        cable_layer = int(cable_layer); individual_layer = int(individual_layer)
+    except (SchematicValueError, TypeError, ValueError) as exc:
+        return _err(exc) if isinstance(exc, SchematicValueError) else {"success": False, "error": "layers must be integers."}
+    body = (_guard_prelude(allow_real_project)
+            + _LAYERS_BODY.replace("PAGENAME", cs_escape(page))
+            .replace("CABLELAYER", str(cable_layer)).replace("INDLAYER", str(individual_layer)))
+    r = _execute_script(
+        live._script("LiveConnLayers_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
+        timeout=timeout_seconds,
+    )
+    res = r.get("results") if isinstance(r.get("results"), dict) else r
+    if generate and isinstance(res, dict) and res.get("success") and res.get("changed"):
+        from .generate import generate_connections
+        from . import target as _target
+        g = generate_connections(project_name=_target.get() or None, page_name=page)
+        res["connectionsGenerated"] = bool(g.get("success"))
+    return r

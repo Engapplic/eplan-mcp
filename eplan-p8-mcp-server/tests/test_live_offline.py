@@ -1538,3 +1538,23 @@ def test_update_op_swaps_the_symbol_in_place():
     assert 'if (Has(a, "symbol") && a["symbol"].Type == JTokenType.Object)' in upd
     assert 'MethodByShape(fn.GetType(), "SetSymbolVariant", new string[] { "SymbolVariant", "Boolean" }, false);' in upd
     assert 'B(sy, "useLogicalDefinition", false)' in upd and 'r["symbolBefore"]' in upd
+
+
+def test_set_connection_layers_script(monkeypatch):
+    # the colour of an autoconnect line is its layer: cable conductors on
+    # 311, plain wires on 510, written on the definition points (FIJ/10)
+    from api.actions import cables_live, generate
+    scripts = []
+    monkeypatch.setattr(cables_live, "_execute_script",
+                        lambda s, timeout=0: scripts.append(s) or {"success": True, "results": {"success": True, "changed": [{"handle": "1"}]}})
+    gens = []
+    monkeypatch.setattr(generate, "generate_connections", lambda **kw: gens.append(kw) or {"success": True})
+    r = cables_live.live_set_connection_layers("+CE/2")
+    cs = scripts[-1]
+    assert _string_literals_balanced(cs)
+    assert 'string cableLayer = "311", indLayer = "510";' in cs
+    assert 'string want = kind == "Cable" ? cableLayer : indLayer;' in cs
+    assert 'SetProp(TryRead(dp, "Properties", null), "CONNECTION_ACL_LAYER", want);' in cs
+    assert "if (pts.Count == 0) { noPoint.Add(d); continue; }" in cs
+    assert r["results"]["connectionsGenerated"] is True and gens[0]["page_name"] == "+CE/2"
+    assert cables_live.live_set_connection_layers("+CE/2", cable_layer="x")["success"] is False
