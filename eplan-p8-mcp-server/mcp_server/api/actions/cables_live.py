@@ -348,6 +348,11 @@ _ASSIGN_BODY = '''
                         // the base types (MethodByShape does not), and a connection
                         // that existed before the line needs its two ends locked too.
                         LockAny(cn);
+                        // Writing the cable into a connection also writes its
+                        // connection definition points: on a page copied as a
+                        // window macro they came unlocked (LockingException on a
+                        // 124/59/... object, P26009 =MOV+CAMPO/11, 2026-11-09).
+                        try { object cdps0 = TryRead(cn, "ConnectionDefPoints", null); if (cdps0 != null) foreach (object q0 in (IEnumerable)cdps0) if (q0 != null) LockHard(q0); } catch { }
                         if (attempt >= 1) { LockAny(sr1); LockAny(sr2); try { MethodInfo sm = cn.GetType().GetMethod("SmartLock", Type.EmptyTypes); if (sm != null) sm.Invoke(cn, null); } catch { } }
                         GetWritable(cn.GetType(), "CableNameParts").SetValue(cn, cableParts, null);
                         d["assigned"] = "now";
