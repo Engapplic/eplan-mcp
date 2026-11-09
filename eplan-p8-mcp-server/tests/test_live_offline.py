@@ -967,6 +967,8 @@ def test_assign_cable_connections_checks_name_parts_and_locks(monkeypatch):
     from api.actions import cables_live
     captured = _capture(monkeypatch, cables_live)
     cables_live.live_assign_cable_connections("+CE/2", "-W1", generate=False)
+    # the connection's own definition points are hard-locked before the cable is written into it
+    assert 'object cdps0 = TryRead(cn, "ConnectionDefPoints", null);' in captured["script"] and "LockHard(q0)" in captured["script"]
     cs = captured["script"]
     assert _string_literals_balanced(cs)
     assert "static void LockAny(object o)" in cs
