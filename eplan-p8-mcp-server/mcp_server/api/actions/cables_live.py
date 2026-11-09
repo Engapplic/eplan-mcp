@@ -1678,7 +1678,33 @@ _LAYERS_BODY = '''
                 object dps = TryRead(cn, "ConnectionDefPoints", null);
                 List<object> pts = new List<object>();
                 if (dps != null) foreach (object dp in (IEnumerable)dps) if (dp != null) pts.Add(dp);
-                if (pts.Count == 0) { noPoint.Add(d); continue; }
+                if (pts.Count == 0)
+                {
+                    // No point, wrong layer (the stale 311 of a stub that used
+                    // to be part of a cable connection, P26009 FIJ/10). The
+                    // layer cannot be written without creating a visible
+                    // point - but REMOVING a point resets the connection to
+                    // the default layer (measured: 311 -> point removed ->
+                    // 510). So: write, then remove what the write created.
+                    if (RESET && want == indLayer)
+                    {
+                        try
+                        {
+                            LockHard(cn);
+                            SetProp(props, "CONNECTION_ACL_LAYER", want);
+                            List<object> made = new List<object>();
+                            object dps2 = TryRead(cn, "ConnectionDefPoints", null);
+                            if (dps2 != null) foreach (object dp in (IEnumerable)dps2) if (dp != null) made.Add(dp);
+                            int gone = 0;
+                            foreach (object dp in made) { try { LockHard(dp); dp.GetType().GetMethod("Remove", Type.EmptyTypes).Invoke(dp, null); gone++; } catch (Exception re) { errors.Add(Handle(dp) + ": " + Flatten(re)); } }
+                            d["reset"] = true; d["pointsRemoved"] = gone;
+                            changed.Add(d);
+                        }
+                        catch (Exception e) { errors.Add(Handle(cn) + ": " + Flatten(e)); noPoint.Add(d); }
+                    }
+                    else noPoint.Add(d);
+                    continue;
+                }
                 int written = 0;
                 foreach (object dp in pts)
                 {
@@ -1694,7 +1720,8 @@ _LAYERS_BODY = '''
 
 
 def live_set_connection_layers(page: str, cable_layer: int = 311, individual_layer: int = 510,
-                               generate: bool = True, allow_real_project: bool = False,
+                               generate: bool = True, reset_without_point: bool = True,
+                               allow_real_project: bool = False,
                                timeout_seconds: float = 120.0) -> dict:
     """
     Put every autoconnect line of a page on the layer its kind of
@@ -1712,11 +1739,14 @@ def live_set_connection_layers(page: str, cable_layer: int = 311, individual_lay
     connection of the page that has a definition point and runs a
     connection update so the lines redraw.
 
-    A connection WITHOUT a definition point cannot be given a layer
-    without creating a visible point, so it is only listed in "noPoint";
-    those are drawn on the default layer anyway, and a connection update
-    (eplan_generate_connections, rebuild_all=True for stubborn ones) resets
-    them.
+    A connection WITHOUT a definition point that carries the wrong layer
+    (the stale cable layer of a stub that used to belong to a cable
+    connection) cannot be written without creating a visible point, but
+    removing a point resets the connection to the default layer: with
+    reset_without_point (default) the wanted individual layer is written
+    and the point that write created is removed at once ("reset": True in
+    "changed"). Only for the individual layer, which is the default; a
+    plain wire that would need the cable layer stays in "noPoint".
 
     Args:
         page: Page name.
@@ -1737,7 +1767,8 @@ def live_set_connection_layers(page: str, cable_layer: int = 311, individual_lay
         return _err(exc) if isinstance(exc, SchematicValueError) else {"success": False, "error": "layers must be integers."}
     body = (_guard_prelude(allow_real_project)
             + _LAYERS_BODY.replace("PAGENAME", cs_escape(page))
-            .replace("CABLELAYER", str(cable_layer)).replace("INDLAYER", str(individual_layer)))
+            .replace("CABLELAYER", str(cable_layer)).replace("INDLAYER", str(individual_layer))
+            .replace("RESET", "true" if reset_without_point else "false"))
     r = _execute_script(
         live._script("LiveConnLayers_" + uuid.uuid4().hex[:6], body,
                      extra_helpers=schematic._HELPERS_SCHEMATIC + _HELPERS_TERM + _HELPERS_CABLE),
