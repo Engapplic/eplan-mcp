@@ -218,6 +218,7 @@ from .ops import (
     live_find_placements,
     live_place_device,
     live_insert_macro,
+    live_create_device_from_part,
     live_place_structure_box,
     live_place_image,
     live_resize_box,
@@ -523,7 +524,7 @@ __all__ = [
     'dataportal_add_to_download_list', 'dataportal_search_count',
     # Target project + batched page operations
     'live_set_target_project',
-    'live_batch', 'live_find_placements', 'live_place_device', 'live_insert_macro',
+    'live_batch', 'live_find_placements', 'live_place_device', 'live_insert_macro', 'live_create_device_from_part',
     'live_place_structure_box', 'live_place_image', 'live_resize_box',
     'live_place_panel_item', 'live_place_plc_point', 'live_place_terminal',
     'live_update_placement', 'live_render_page', 'live_check_page',

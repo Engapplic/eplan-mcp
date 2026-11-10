@@ -39,7 +39,7 @@ Use one of these whenever you are unsure of an exact action name or parameter â€
 
 ## 2. The local `eplan` action server
 
-It exposes **256 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
+It exposes **257 tools** (full tool-by-tool reference: [covaga.dev/docs/tools](https://covaga.dev/docs/tools/project-and-workspace-management/)):
 
 - **8 connection/utility tools**: `eplan_versions`, `eplan_servers`,
   `eplan_connect`, `eplan_status`, `eplan_ping`, `eplan_test`,
@@ -65,6 +65,11 @@ JSON file instead of the conversation) (update also takes `symbol`: {"library","
   top-left corner (the inserted objects are shifted, never re-inserted),
   EVERY device it brought tagged - a PLC box and its terminals share the
   tag, the part goes on the main function),
+  `eplan_live_create_device_from_part` (a device FROM ITS PART, like dragging it from the
+  parts navigator: DeviceService.CreateDevice places the part's macro with the box as MAIN
+  function carrying the part, renames the automatic -A1 to `tag` and lists the macro's
+  variants; a box from insert_macro is secondary and refuses a part, S063074. Next
+  connectors: insert_macro with the same tag and no part),
   `eplan_live_place_structure_box` (=ST1+CAMPO box by two corners; the
   devices inside are renamed to its structure; label visible, inside the
   box by default via `label_scheme` - "Arriba a la izquierda, dentro 0Â°",
