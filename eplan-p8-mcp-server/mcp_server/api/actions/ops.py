@@ -11,6 +11,7 @@ This module fixes both:
     live_find_placements        objects by device tag, not by handle
     live_place_device           place + tag + part + properties in one go
     live_insert_macro           a window macro, by insertion point or top-left
+    live_create_device_from_part  a device from its part (main box + part), like a drag
     live_place_panel_item       a part on the panel: its macro, or a rectangle
     live_place_plc_point        a PLC connection point with its definition
     live_place_terminal         a terminal with its strip and number
@@ -75,6 +76,7 @@ __all__ = [
     "live_find_placements",
     "live_place_device",
     "live_insert_macro",
+    "live_create_device_from_part",
     "live_place_panel_item",
     "live_place_plc_point",
     "live_place_terminal",
@@ -413,6 +415,15 @@ _OPS_HELPERS = r'''
         // its box like DCP pins do and carry the same stale own code
         // ("-A30.4-A30.3-A30.3:1" on P26009)
         return tn == "Function" || tn == "Terminal";
+    }
+
+    // the boxes of a macro whose pins follow the box's tag: a black box
+    // (BoxedDevice) and a PLC box (class "PLC": a TBEN / EX600 module macro)
+    static bool IsMacroBox(object o)
+    {
+        if (o == null) return false;
+        string tn = o.GetType().Name;
+        return tn == "BoxedDevice" || tn == "PLC";
     }
 
     static bool PinFollowBox(object o)
@@ -963,8 +974,10 @@ _OPS_HELPERS = r'''
         // "-B17-B17:1" once the box is tagged too (P26009 /13, 2026-11-09).
         // Tagged after the box, the pins share its DT and nothing nests.
         List<object> boxesFirst = new List<object>();
-        foreach (object o in devObjs) if (o.GetType().Name == "BoxedDevice") boxesFirst.Add(o);
-        foreach (object o in devObjs) if (o.GetType().Name != "BoxedDevice") boxesFirst.Add(o);
+        // a PLC box ("PLC", a module macro such as the TBEN) is a box too:
+        // its terminals were tagged "-A23-A23:1" (P26009 2026-11-10)
+        foreach (object o in devObjs) if (IsMacroBox(o)) boxesFirst.Add(o);
+        foreach (object o in devObjs) if (!IsMacroBox(o)) boxesFirst.Add(o);
         devObjs = boxesFirst;
         HashSet<string> own = new HashSet<string>();
         foreach (object o in devObjs) own.Add(Handle(o));
@@ -972,7 +985,7 @@ _OPS_HELPERS = r'''
         // box's tag; they are not tagged themselves
         HashSet<string> following = new HashSet<string>();
         if (Has(a, "tag"))
-            foreach (object o in devObjs) if (o.GetType().Name == "BoxedDevice")
+            foreach (object o in devObjs) if (IsMacroBox(o))
                 foreach (object pn in PinsOfBox(page, o, own)) { try { PinFollowBox(pn); } catch { } following.Add(Handle(pn)); }
         if (following.Count > 0) r["pinsFollow"] = following.Count;
         // The part goes on the main functions only (a PLC card: the box, not
@@ -2237,6 +2250,215 @@ def live_insert_macro(page: str, macro_file: str, x: float, y: float,
     _optional(op, tag=tag, part=part)
     return _single(run_ops(page, [op], allow_real_project=allow_real_project,
                            timeout_seconds=timeout_seconds))
+
+
+_CREATE_DEVICE_BODY = r'''
+            object page = FindPage(project, PAGENAME);
+            Type dsT = FindType("Eplan.EplApi.HEServices.DeviceService");
+            MethodInfo cd = null;
+            foreach (MethodInfo m in dsT.GetMethods())
+            {
+                ParameterInfo[] ps = m.GetParameters();
+                if (m.Name == "CreateDevice" && ps.Length == 4 && ps[0].ParameterType == typeof(string)) cd = m;
+            }
+            if (cd == null) throw new Exception("DeviceService.CreateDevice(string, string, Page, PointD) not found");
+            object ds = Activator.CreateInstance(dsT);
+            Array fs = (Array)Call(cd, ds, new object[] { PARTNR, VARIANT, page,
+                MakePoint(FindType("Eplan.EplApi.Base.PointD"), XPOS, YPOS) });
+            if (fs == null || fs.Length == 0)
+                throw new Exception("CreateDevice placed nothing: part " + PARTNR + " variant " + VARIANT +
+                    " is not in the parts database, has no macro, or that article variant does not exist.");
+            List<object> funcs = new List<object>();
+            string main = null, mainName = null, macro = null;
+            foreach (object f in fs)
+            {
+                Dictionary<string, object> d = new Dictionary<string, object>();
+                d["handle"] = Handle(f); d["name"] = TryRead(f, "Name", null);
+                object sv = TryRead(f, "SymbolVariant", null); object sy = sv == null ? null : TryRead(sv, "Parent", null);
+                if (sy != null) d["symbol"] = (PropText(sy, "Name") ?? "") + " v" + TryRead(sv, "VariantNr", null);
+                object im = TryRead(f, "IsMainFunction", null);
+                bool isMain = im != null && Convert.ToBoolean(im);
+                if (isMain)
+                {
+                    d["main"] = true;
+                    List<string> arts = new List<string>();
+                    object ar = TryRead(f, "ArticleReferences", null);
+                    if (ar != null) foreach (object a in (IEnumerable)ar)
+                    {
+                        arts.Add(TryRead(a, "PartNr", null) + "/" + TryRead(a, "VariantNr", null));
+                        if (macro == null) { try { macro = PropText(TryRead(a, "Properties", null), "ARTICLE_MACRO"); } catch { } }
+                    }
+                    d["parts"] = arts;
+                    if (main == null) { main = Handle(f); mainName = Convert.ToString(TryRead(f, "Name", null)); }
+                }
+                funcs.Add(d);
+            }
+            results["autoName"] = mainName;
+            // Rename: every function the part made starts with the automatic
+            // name ("=TST+CAMPO-A1", "...-A1:1"); swap that prefix. The pins of
+            // a TBEN-L5 sit outside its box, so "follow the box" misses them.
+            string want = TAGVALUE;
+            if (want != "" && mainName != null)
+            {
+                int dash = mainName.LastIndexOf('-');
+                string full = want.StartsWith("=") || want.StartsWith("+") || dash < 0 ? want : mainName.Substring(0, dash) + want;
+                List<string> clash = new List<string>();
+                if (!ALLOWMERGE)
+                {
+                    HashSet<string> mine = new HashSet<string>();
+                    foreach (object f in fs) mine.Add(Handle(f));
+                    object pages = TryRead(project, "Pages", null);
+                    if (pages != null) foreach (object pg2 in (IEnumerable)pages)
+                    {
+                        object pfs = TryRead(pg2, "Functions", null);
+                        if (pfs == null) continue;
+                        foreach (object f in (IEnumerable)pfs)
+                        {
+                            if (mine.Contains(Handle(f))) continue;
+                            string n = Convert.ToString(TryRead(f, "Name", null) ?? "");
+                            if (n == full || n.StartsWith(full + ":")) { clash.Add(n + " on " + PropText(pg2, "Name")); break; }
+                        }
+                        if (clash.Count > 0) break;
+                    }
+                }
+                if (clash.Count > 0) results["tagError"] = "Tag " + full + " is already in use (" + clash[0] + "): the device stays " + mainName + ". Pass allow_merge=True to merge it.";
+                else
+                {
+                    int renamed = 0; List<string> errs = new List<string>();
+                    foreach (object f in fs)
+                    {
+                        string n = Convert.ToString(TryRead(f, "Name", null) ?? "");
+                        if (!n.StartsWith(mainName)) continue;
+                        try
+                        {
+                            LockTree(f);
+                            GetWritable(f.GetType(), "Name").SetValue(f, full + n.Substring(mainName.Length), null);
+                            renamed++;
+                        }
+                        catch (Exception e) { errs.Add(n + ": " + Flatten(e)); }
+                    }
+                    results["renamed"] = renamed; results["tag"] = full;
+                    if (errs.Count > 0) results["tagErrors"] = errs;
+                    mainName = full;
+                }
+            }
+            results["functions"] = funcs; results["mainHandle"] = main; results["mainName"] = mainName;
+            if (!string.IsNullOrEmpty(macro))
+            {
+                results["macro"] = macro;
+                try
+                {
+                    string path = macro;
+                    Type pm = FindType("Eplan.EplApi.Base.PathMap");
+                    MethodInfo sub = pm == null ? null : pm.GetMethod("SubstitutePath", new Type[] { typeof(string) });
+                    if (sub != null) path = Convert.ToString(sub.Invoke(null, new object[] { macro }));
+                    results["macroFile"] = path;
+                    Type wmT = FindType("Eplan.EplApi.DataModel.MasterData.WindowMacro");
+                    Type rtT = FindType("Eplan.EplApi.DataModel.MasterData.WindowMacro+Enums+RepresentationType")
+                               ?? FindType("Eplan.EplApi.DataModel.MasterData.WindowMacro.Enums.RepresentationType");
+                    object wm = Activator.CreateInstance(wmT);
+                    wmT.GetMethod("Open", new Type[] { typeof(string), project.GetType() }).Invoke(wm, new object[] { path, project });
+                    List<object> vars = new List<object>();
+                    MethodInfo gv = wmT.GetMethod("GetVariants");
+                    Type rt = gv.GetParameters()[0].ParameterType;
+                    Array ints = (Array)gv.Invoke(wm, new object[] { Enum.Parse(rt, "MultiLine") });
+                    MethodInfo ccv = wmT.GetMethod("ChangeCurrentVariant");
+                    foreach (object n in ints)
+                    {
+                        Dictionary<string, object> v = new Dictionary<string, object>(); v["variant"] = n;
+                        try
+                        {
+                            ccv.Invoke(wm, new object[] { Enum.Parse(rt, "MultiLine"), n });
+                            object ds2 = TryRead(wm, "Description", null);
+                            string t = ds2 == null ? null : Convert.ToString(ds2.GetType().GetMethod("GetStringToDisplay", new Type[] { typeof(string) }) != null
+                                ? ds2.GetType().GetMethod("GetStringToDisplay", new Type[] { typeof(string) }).Invoke(ds2, new object[] { "es_ES" }) : ds2);
+                            if (!string.IsNullOrEmpty(t)) v["description"] = t;
+                        }
+                        catch { }
+                        vars.Add(v);
+                    }
+                    results["macroVariants"] = vars;
+                    try { wmT.GetMethod("Dispose").Invoke(wm, null); } catch { }
+                }
+                catch (Exception e) { results["macroVariantsError"] = Flatten(e); }
+            }
+            results["success"] = true;
+'''
+
+
+def live_create_device_from_part(page: str, part_number: str, x: float, y: float,
+                                 tag: str = None, article_variant: str = "1",
+                                 allow_merge: bool = False,
+                                 allow_real_project: bool = False,
+                                 timeout_seconds: float = 180.0) -> dict:
+    """
+    Create a device FROM ITS PART, as dragging the part from the parts
+    navigator onto a schematic does. WRITES - scratch-only by default.
+
+    Use it for a part that brings its own macro (an I/O module, a valve
+    island): DeviceService.CreateDevice places the part's macro and makes the
+    box the device's MAIN function with the part assigned. A macro inserted
+    with live_insert_macro gives a box that is NOT the main function, and a
+    secondary function refuses a part (CannotAddArticleException S063074,
+    TBEN-S2-4AI in P26009 2026-11-10).
+
+    Only the first macro variant is placed (on the TBEN-S2-4AI: connector
+    "C." with its 5 pins). Place the next connectors with live_insert_macro
+    (macro_file = the returned "macroFile", variant_nr from
+    "macroVariants", tag = the same tag, NO part): they join the device as
+    secondary boxes, and the part stays only on the main one - which is
+    right.
+
+    Args:
+        page: Page name.
+        part_number: "TUR.6814025". Must be in the parts database.
+        x, y: Insertion point, in mm.
+        tag: Device tag to give it ("-A23" or "=FIJ+CAMPO-A23"). EPLAN names
+            the device with the next free number ("-A1"); this renames every
+            function it made, box and pins ("-A1:3" -> "-A23:3"). A tag
+            without = / + keeps the page's structure. Refused when the tag is
+            already used anywhere in the project (the device then keeps its
+            automatic name and the result says so), unless allow_merge.
+        article_variant: The PART's variant (not the macro's), default "1".
+        allow_merge: Permit a tag already in use (the device is merged).
+        allow_real_project: Must be True to write outside the scratch root.
+
+    Returns:
+        {"success", "handle" (main box), "name", "autoName" (before the
+         rename), "renamed", "parts", "functions": [{handle, name (automatic),
+         symbol, main?}], "macroFile", "macroVariants": [{variant,
+         description?}], "error"?}
+    """
+    try:
+        page = cs_text(page, "page")
+        part_cs = cs_escape(cs_text(part_number, "part_number"))
+        var_cs = cs_escape(cs_text(str(article_variant), "article_variant"))
+        tag_cs = cs_escape(cs_text(tag, "tag")) if tag else ""
+    except SchematicValueError as exc:
+        return _err(exc)
+    body = (schematic._guard_prelude(allow_real_project)
+            + _CREATE_DEVICE_BODY.replace("PAGENAME", '"%s"' % cs_escape(page))
+            .replace("PARTNR", '"%s"' % part_cs).replace("VARIANT", '"%s"' % var_cs)
+            .replace("XPOS", repr(float(x))).replace("YPOS", repr(float(y)))
+            .replace("TAGVALUE", '"%s"' % tag_cs).replace("ALLOWMERGE", "true" if allow_merge else "false"))
+    raw = scripted._execute_script(
+        live._script("LiveCreateDevice_" + uuid.uuid4().hex[:6], body,
+                     extra_helpers=schematic._HELPERS_SCHEMATIC),
+        timeout=timeout_seconds)
+    res = raw.get("results") if isinstance(raw.get("results"), dict) else raw
+    if not isinstance(res, dict) or not res.get("success"):
+        return res if isinstance(res, dict) else {"success": False, "error": str(res)}
+    main = next((f for f in res.get("functions", []) if f.get("main")), {})
+    out = {"success": True, "page": page, "handle": res.get("mainHandle"),
+           "name": res.get("mainName"), "autoName": res.get("autoName"),
+           "parts": main.get("parts", []), "functions": res.get("functions", [])}
+    for k in ("renamed", "tagErrors", "macro", "macroFile", "macroVariants", "macroVariantsError"):
+        if k in res:
+            out[k] = res[k]
+    if res.get("tagError") or res.get("tagErrors"):
+        out["success"] = False
+        out["error"] = res.get("tagError") or "Renaming failed for some functions: %s" % res["tagErrors"]
+    return out
 
 
 def live_place_structure_box(page: str, name: str, x1: float, y1: float, x2: float, y2: float,

@@ -471,3 +471,44 @@ def test_structure_box_label_scheme(one_shot):
     assert 'return t.StartsWith("Eplan.") ? t : "Eplan.EplApi.DataModel." + t;' in cs
     ops.live_place_structure_box("=ST1+CAMPO/1", "=ST1+CAMPO", 50, 150, 280, 240, label_scheme=None)
     assert one_shot["request"]["ops"][0]["labelScheme"] == ""
+
+
+def test_create_device_from_part_renames_in_the_script(monkeypatch):
+    scripts = []
+
+    def fake_exec(script, timeout=None):
+        scripts.append(script)
+        return {"success": True, "results": {"success": True, "mainHandle": "141/17/1/0",
+                "mainName": "=TST+CAMPO-A23", "autoName": "=TST+CAMPO-A1", "renamed": 6,
+                "functions": [{"handle": "141/17/1/0", "name": "=TST+CAMPO-A1", "main": True, "parts": ["TUR.6814025/1"]},
+                              {"handle": "141/17/2/0", "name": "=TST+CAMPO-A1:1"}],
+                "macroFile": "X:/m.ema", "macroVariants": [{"variant": 0}, {"variant": 1}]}}
+
+    monkeypatch.setattr(ops.scripted, "_execute_script", fake_exec)
+    out = ops.live_create_device_from_part("=TST+CAMPO/1", "TUR.6814025", 60, 200, tag="-A23")
+    cs = scripts[0]
+    assert '"CreateDevice"' in cs and '"TUR.6814025", "1", page' in cs
+    assert 'string want = "-A23";' in cs and "if (!false)" in cs
+    # the prefix swap renames box AND pins (TBEN-L5 pins sit outside the box)
+    assert 'SetValue(f, full + n.Substring(mainName.Length), null)' in cs
+    assert '"Eplan.EplApi.DataModel.MasterData.WindowMacro"' in cs and '"GetVariants"' in cs
+    assert out["success"] is True and out["name"] == "=TST+CAMPO-A23" and out["autoName"] == "=TST+CAMPO-A1"
+    assert out["renamed"] == 6 and out["parts"] == ["TUR.6814025/1"] and out["macroFile"] == "X:/m.ema"
+    ops.live_create_device_from_part("p", "TUR.6814025", 0, 0, tag="-A23", allow_merge=True)
+    assert "if (!true)" in scripts[-1]
+
+
+def test_create_device_from_part_tag_clash_is_an_error(monkeypatch):
+    monkeypatch.setattr(ops.scripted, "_execute_script", lambda s, timeout=None: {"success": True, "results": {
+        "success": True, "mainHandle": "h", "mainName": "-A1", "autoName": "-A1",
+        "tagError": "Tag =X-A23 is already in use", "functions": [{"handle": "h", "main": True}]}})
+    out = ops.live_create_device_from_part("p", "TUR.6814025", 0, 0, tag="-A23")
+    assert out["success"] is False and "already in use" in out["error"] and out["name"] == "-A1"
+
+
+def test_macro_pins_of_a_plc_box_follow_it(one_shot):
+    ops.live_insert_macro("=ST1+CAMPO/1", __file__, 60, 200, tag="-A23")
+    cs = one_shot["script"]
+    # a TBEN macro's PLC box: its terminals were tagged "-A23-A23:1"
+    assert 'return tn == "BoxedDevice" || tn == "PLC";' in cs
+    assert "foreach (object o in devObjs) if (IsMacroBox(o))" in cs
